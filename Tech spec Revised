@@ -1,0 +1,176 @@
+1. Overview
+
+CR-Counter is a Streamlit-based web app for generating counterpoint-based musical scores in multiple styles and species.
+It now supports MusicXML, MIDI export, and inline audio previews (basic synthesized sound demos).
+The app can generate arrangements with lead, counterpoint, bass, and pad roles, mapped to user-selected instruments.
+
+2. Features
+🎼 Score Generation
+
+Generates cantus firmus and counterpoint lines in species 1–5 + Classical.
+
+Supports major, natural minor, and harmonic minor modes.
+
+Styles available: Pop, Rock, R&B, Dance, Country, Folk, World, Classical, Jazz, Latin.
+
+Counterpoint rules include consonance checks and step-wise motion.
+
+🎹 Instrumentation
+
+Instruments categorized by role:
+
+Lead: Flute, Oboe, Violin
+
+Counterpoint: Clarinet, Reed Section, Viola
+
+Bass: Cello, Double Bass
+
+Pad: Piano Pad, Strings Pad
+
+Each has MIDI pitch ranges and General MIDI program mappings.
+
+🖼️ Visual & UI
+
+Full-page background image support (static or uploaded).
+
+Sidebar image uploader for branding.
+
+Streamlit UI with dropdowns, sliders, and live preview.
+
+3. File Outputs
+MusicXML Export
+
+Standard .xml score file with:
+
+Measures, key signatures, time signatures.
+
+Instrument parts.
+
+Note durations mapped to eighth/quarter/half/whole.
+
+Compatible with MuseScore, Sibelius, Finale, etc.
+
+MIDI Export (NEW)
+
+Generates .mid files using midiutil.
+
+Each instrument = separate track.
+
+General MIDI program numbers applied for instrument timbres.
+
+Avoids percussion channel 9.
+
+Fully compatible with DAWs and sequencers.
+
+WAV Audio Previews (NEW)
+
+Quick synthesized previews for first 4 bars per part:
+
+Waveforms: sine, saw, triangle (per instrument family).
+
+ADSR envelope for natural fade.
+
+16-bit PCM, mono, 44.1kHz.
+
+Provides inline Streamlit audio player + download buttons.
+
+Intended as demo only (not full render).
+
+4. Architecture
+Core Modules
+
+Key/Mode Normalization
+
+Converts user input into standardized internal format.
+
+Handles sharps/flats and minor variants.
+
+Scale Generator
+
+Returns allowed MIDI pitches for given key/mode.
+
+Lead Generator
+
+Builds melodic line with weighted intervals.
+
+Enforces cadential resolution to tonic.
+
+Counterpoint Generator
+
+Implements rules for species 1–5 + Classical.
+
+Ensures consonance with cantus firmus.
+
+Arrangement Patterns
+
+Rhythm patterns defined per style.
+
+Parts (lead, counter, bass, pad) follow style-based rhythmic cells.
+
+Output Modules
+
+MusicXML writer: ET-based XML tree builder.
+
+MIDI writer: midiutil-based multi-track builder.
+
+Audio preview synth: wave + math oscillator with ADSR.
+
+5. Tech Stack
+
+Python 3.10+
+
+Libraries
+
+streamlit — UI
+
+Pillow — image handling
+
+xml.etree.ElementTree — MusicXML serialization
+
+midiutil — MIDI file creation (NEW)
+
+wave, struct, math — WAV synthesis (NEW)
+
+6. User Flow
+
+User selects key, mode, style, species, bars, tempo, instruments.
+
+System generates lead line.
+
+Counterpoint, bass, pad voices are constructed accordingly.
+
+Outputs:
+
+MusicXML (multi-part score).
+
+MIDI (multi-track sequence).
+
+Inline WAV previews (per instrument).
+
+User downloads files or listens to previews.
+
+7. Limitations
+
+WAV previews are simplistic synth sounds (no real sampled instruments).
+
+MIDI export uses General MIDI program numbers (may vary across DAWs).
+
+Counterpoint rules simplified vs. full Fuxian strict counterpoint.
+
+Only first 16 notes shown in preview; full arrangement in downloads.
+
+8. Roadmap (Future Enhancements)
+
+✅ Current: MusicXML, MIDI, WAV previews.
+
+🚀 Future:
+
+Full mixdown audio render (all parts combined).
+
+Style-specific articulation (swing, rubato).
+
+Upload/import user themes for variation.
+
+Expand instrument set with more roles (brass, percussion).
+
+AI-assisted fugue subject development (generate Bach-like fugues).
