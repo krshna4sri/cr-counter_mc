@@ -1,7 +1,9 @@
 # cr_counter_app_viz_full.py — CR-Counter with full-page background + styles + species + multi-instrument + Raga modes
-# Fixes:
-#  - Correct Hindolam degrees -> [0,3,5,8,11]
-#  - Style rhythm (Pop/Latin/...) is ALWAYS used, even with upload-guided generation
+# Improvements:
+#  - Key is a dropdown (canonical keys) — prevents silent fallbacks
+#  - If a Carnatic Raga is selected, Mode is disabled and ignored (clear UX)
+#  - Hindolam corrected to [0,3,5,8,11]
+#  - Arrangement Style always controls rhythm, even with upload-guided contour
 # Run:  python -m streamlit run cr_counter_app_viz_full.py
 from __future__ import annotations
 
@@ -113,7 +115,7 @@ FLAT_KEYS = {"F","Bb","Eb","Ab","Db","Gb","Cb"}
 def prefers_flats(k: str) -> bool: return k in FLAT_KEYS
 
 def normalize_key_mode(key: str, mode: str) -> Tuple[str, str]:
-    """Pass-through for canonical dropdowns: prevents surprise fallbacks."""
+    """Pass-through for canonical dropdown values: prevents surprise fallbacks."""
     k = key if key in MAJOR_PC else "C"
     m = mode if mode in ("major", "natural_minor", "harmonic_minor") else "major"
     return k, m
@@ -130,7 +132,7 @@ def midi_to_name(midi: int, flats=False):
     pc = midi % 12; name = names[pc]; return f"{name}{(midi//12)-1}"
 
 # -------- Raga definitions (semitone degrees from tonic) --------
-# Correct Hindolam: S G2 M1 D1 N3 S -> [0,3,5,8,11]
+# Hindolam: S G2 M1 D1 N3 -> [0,3,5,8,11]
 RAGA_DEGREES = {
     "Shankarabharanam (Major)":       [0,2,4,5,7,9,11],
     "Kalyani (Lydian #4)":            [0,2,4,6,7,9,11],
@@ -145,7 +147,7 @@ RAGA_DEGREES = {
     # Pentatonic
     "Mohanam (Major Pentatonic)":     [0,2,4,7,9],
     "Hamsadhwani":                    [0,2,4,7,11],
-    "Hindolam":                       [0,3,5,8,11],   # <- FIXED
+    "Hindolam":                       [0,3,5,8,11],   # fixed
     "Suddha Saveri":                  [0,2,5,7,9],
     "Abhogi":                         [0,2,3,5,7],
     "Sreeranjani":                    [0,2,3,6,9],
@@ -162,8 +164,6 @@ RAGA_DEGREES = {
     "Shubhapantuvarali":              [0,1,4,5,7,8,11],
     "Todi (Hanumatodi)":              [0,1,3,6,7,8,11],
 }
-
-RAGA_LIST = ["None (use Western mode)"] + list(RAGA_DEGREES.keys())
 
 def raga_scale_midis(key: str, raga: Optional[str], low=36, high=96) -> List[int]:
     tonic = MAJOR_PC[key]
@@ -452,7 +452,7 @@ def parts_to_wav_preview(parts, tempo_bpm, bars=4, sr=22050):
 @dataclass
 class ScoreFingerprint:
     contour: List[int]         # sequence of melodic intervals in scale degrees-ish
-    rhythm_quavers: List[int]  # unused now for style consistency, but kept for future
+    rhythm_quavers: List[int]  # preserved for future; rhythm now comes from Style
     tonic_pc: int
     mode_guess: str
 
@@ -497,7 +497,6 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
         elif d > 0: contour.append(+1)
         else: contour.append(0)
 
-    # keep rhythm for possible future, but we now always use style rhythm
     try:
         ql = s.flat.quarterLength
         n_quavers = int(round(ql * 2))
@@ -510,8 +509,8 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
 
 def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[str], bars: int, register=(60,84)):
     """
-    Build an eighth-note resolution melody driven by a contour, but DO NOT set the rhythm here.
-    We always return bars*8 slots; rhythm is chosen by style (Pop/Latin/...).
+    Build an eighth-note resolution melody driven by a contour (bars*8 slots).
+    Rhythm is chosen by Arrangement Style; we only return the pitches here.
     """
     scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
     tonic_pc = MAJOR_PC[key]
@@ -555,13 +554,28 @@ with st.sidebar:
 
 col1, col2 = st.columns(2)
 
-# Key & Mode dropdowns (prevents “fall back to C”)
+# Key dropdown (prevents silent fallbacks)
 key_input = col1.selectbox("Key", KEYS_CANON, index=KEYS_CANON.index("C"), key="ui_key")
-mode_input = col2.selectbox("Mode", ["major","harmonic_minor","natural_minor"], index=0, key="ui_mode")
 
-# Carnatic Raga (optional)
-raga_input = st.selectbox("Carnatic Raga (optional)", ["None (use Western mode)"] + list(RAGA_DEGREES.keys()), index=0,
-                          help="Choose a raga to constrain pitch material. Rhythm still comes from Arrangement Style.")
+# Raga first, so we can disable Mode if a raga is active
+raga_input = st.selectbox(
+    "Carnatic Raga (optional)",
+    ["None (use Western mode)"] + list(RAGA_DEGREES.keys()),
+    index=0,
+    help="If a raga is selected it defines the pitch material; Mode is ignored."
+)
+
+# Mode is disabled when a Raga is active
+mode_disabled = (raga_input != "None (use Western mode)")
+mode_input = col2.selectbox(
+    "Mode (ignored when a Raga is selected)",
+    ["major","harmonic_minor","natural_minor"],
+    index=0,
+    key="ui_mode",
+    disabled=mode_disabled
+)
+if mode_disabled:
+    st.caption("**Mode is ignored** because a Carnatic Raga is active.")
 
 style = st.selectbox("Arrangement Style", list(STYLE_PATTERNS.keys()), index=2)
 species = st.selectbox("Counterpoint Species (counter part)", ["1","2","3","4","5","Classical"], index=2)
@@ -579,8 +593,10 @@ chosen = st.multiselect("Pick instruments (first lead carries melody)", availabl
                         default=["Flute","Reed Section","Double Bass","Strings Pad","Piano Pad"])
 
 st.markdown("#### Optional: upload a reference score (MusicXML or MIDI)")
-upload = st.file_uploader("We’ll learn the melodic contour; rhythm always follows your Arrangement Style.",
-                          type=["xml","musicxml","mxl","mid","midi"])
+upload = st.file_uploader(
+    "We’ll learn the melodic contour; rhythm always follows your Arrangement Style.",
+    type=["xml","musicxml","mxl","mid","midi"]
+)
 
 fp: Optional[ScoreFingerprint] = None
 if upload is not None and _HAS_M21:
