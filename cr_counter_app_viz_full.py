@@ -1,4 +1,7 @@
 # cr_counter_app_viz_full.py — CR-Counter with full-page background + styles + species + multi-instrument + Raga modes
+# Fixes:
+#  - Correct Hindolam degrees -> [0,3,5,8,11]
+#  - Style rhythm (Pop/Latin/...) is ALWAYS used, even with upload-guided generation
 # Run:  python -m streamlit run cr_counter_app_viz_full.py
 from __future__ import annotations
 
@@ -73,10 +76,10 @@ def load_header_image() -> Image.Image | None:
     for c in [
         "header.jpg",
         "header.png",
-        "header.jpg.jpg",               # your uploaded filename
+        "header.jpg.jpg",
         "cover.jpg",
         "cover.png",
-        "VS_Pop_Funky_1400x1400.jpg",   # image you shared
+        "VS_Pop_Funky_1400x1400.jpg",
     ]:
         try:
             return Image.open(c).convert("RGB")
@@ -93,7 +96,6 @@ def hero(title: str):
 
 
 # -------------------- Theory helpers --------------------
-# Canonical keys (exact names used everywhere)
 KEYS_CANON = [
     "C","G","D","A","E","B","F#","C#",
     "F","Bb","Eb","Ab","Db","Gb","Cb"
@@ -111,9 +113,7 @@ FLAT_KEYS = {"F","Bb","Eb","Ab","Db","Gb","Cb"}
 def prefers_flats(k: str) -> bool: return k in FLAT_KEYS
 
 def normalize_key_mode(key: str, mode: str) -> Tuple[str, str]:
-    """
-    Pass-through validator for canonical dropdowns: prevents the old 'Gm->Am flips to C' bug.
-    """
+    """Pass-through for canonical dropdowns: prevents surprise fallbacks."""
     k = key if key in MAJOR_PC else "C"
     m = mode if mode in ("major", "natural_minor", "harmonic_minor") else "major"
     return k, m
@@ -130,9 +130,8 @@ def midi_to_name(midi: int, flats=False):
     pc = midi % 12; name = names[pc]; return f"{name}{(midi//12)-1}"
 
 # -------- Raga definitions (semitone degrees from tonic) --------
-# These are practical approximations for algorithmic generation.
+# Correct Hindolam: S G2 M1 D1 N3 S -> [0,3,5,8,11]
 RAGA_DEGREES = {
-    # Heptatonic (sampurna)
     "Shankarabharanam (Major)":       [0,2,4,5,7,9,11],
     "Kalyani (Lydian #4)":            [0,2,4,6,7,9,11],
     "Harikambhoji (Mixolydian)":      [0,2,4,5,7,9,10],
@@ -140,38 +139,36 @@ RAGA_DEGREES = {
     "Natabhairavi (Natural Minor)":   [0,2,3,5,7,8,10],
     "Keeravani (Harmonic Minor)":     [0,2,3,5,7,8,11],
     "Charukesi":                      [0,2,4,5,7,8,11],
-    "Sarasangi":                      [0,1,4,5,7,9,11],   # R1 G3 etc (approx)
-    "Mararanjani":                    [0,2,4,6,7,8,10],   # Lydian b6 b7 (approx)
+    "Sarasangi":                      [0,1,4,5,7,9,11],
+    "Mararanjani":                    [0,2,4,6,7,8,10],
 
     # Pentatonic
     "Mohanam (Major Pentatonic)":     [0,2,4,7,9],
     "Hamsadhwani":                    [0,2,4,7,11],
-    "Hindolam (Minor Pentatonic)":    [0,3,5,7,8],
+    "Hindolam":                       [0,3,5,8,11],   # <- FIXED
     "Suddha Saveri":                  [0,2,5,7,9],
     "Abhogi":                         [0,2,3,5,7],
-    "Sreeranjani":                    [0,2,3,6,9],       # practical pentatonic variant used in film/algos
+    "Sreeranjani":                    [0,2,3,6,9],
     "Madhyamavati":                   [0,2,5,7,10],
-    "Megh (Megh Malhar)":             [0,2,5,7,9],       # same as Suddha Saveri (common handling)
+    "Megh (Megh Malhar)":             [0,2,5,7,9],
 
-    # Hexatonic (shadava) / other popular
+    # Hexatonic / others
     "Durga":                          [0,2,5,7,9,10],
-    "Devakriya (Sudha Dhanyasi)":     [0,2,3,7,9],       # often pentatonic; include variants
-    "Revati":                         [0,1,5,7,11],      # symmetric-ish (approx)
-    "Amritavarshini":                 [0,4,6,7,11],      # Lydian augmented-ish (approx)
+    "Devakriya (Sudha Dhanyasi)":     [0,2,3,7,9],
+    "Revati":                         [0,1,5,7,11],
+    "Amritavarshini":                 [0,4,6,7,11],
     "Vachaspati (Lydian b7)":         [0,2,4,6,7,9,10],
     "Hemavati":                       [0,2,3,6,7,9,11],
-    "Shubhapantuvarali":              [0,1,4,5,7,8,11],  # HM with R1 (approx)
-    "Todi (Hanumatodi)":              [0,1,3,6,7,8,11],  # strong flavor; coarse approx
+    "Shubhapantuvarali":              [0,1,4,5,7,8,11],
+    "Todi (Hanumatodi)":              [0,1,3,6,7,8,11],
 }
 
 RAGA_LIST = ["None (use Western mode)"] + list(RAGA_DEGREES.keys())
 
 def raga_scale_midis(key: str, raga: Optional[str], low=36, high=96) -> List[int]:
-    """Return allowed MIDI notes for the selected raga or Western scale."""
     tonic = MAJOR_PC[key]
     if not raga or raga == "None (use Western mode)":
-        # Caller should pass mode-based scale if not using raga
-        return list(range(low, high+1))  # neutral; caller will filter by mode
+        return list(range(low, high+1))  # neutral; caller filters with Western mode
     degrees = set(RAGA_DEGREES.get(raga, DIATONIC_MAJOR))
     allowed_pc = set((tonic + d) % 12 for d in degrees)
     return [m for m in range(low, high+1) if (m % 12) in allowed_pc]
@@ -184,7 +181,6 @@ def western_scale_midis(key: str, mode: str, low=36, high=96) -> List[int]:
     return [m for m in range(low, high+1) if (m % 12) in allowed]
 
 def scale_midis(key: str, mode: str, raga: Optional[str], low=36, high=96) -> List[int]:
-    """Unified access: if raga chosen -> raga scale, else Western by mode."""
     if raga and raga != "None (use Western mode)":
         return raga_scale_midis(key, raga, low, high)
     return western_scale_midis(key, mode, low, high)
@@ -456,7 +452,7 @@ def parts_to_wav_preview(parts, tempo_bpm, bars=4, sr=22050):
 @dataclass
 class ScoreFingerprint:
     contour: List[int]         # sequence of melodic intervals in scale degrees-ish
-    rhythm_quavers: List[int]  # rhythm as a sequence of 1/8 counts (summing to bars*8)
+    rhythm_quavers: List[int]  # unused now for style consistency, but kept for future
     tonic_pc: int
     mode_guess: str
 
@@ -492,7 +488,6 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
         st.warning("Uploaded score has too few melodic notes to fingerprint.")
         return None
 
-    # crude monophonic contour (signed semitone differences binned to -2..+2)
     contour = []
     for i in range(1, len(midi)):
         d = midi[i] - midi[i-1]
@@ -502,8 +497,7 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
         elif d > 0: contour.append(+1)
         else: contour.append(0)
 
-    # crude quaver-based rhythm (fallback to straight eighths)
-    quavers = []
+    # keep rhythm for possible future, but we now always use style rhythm
     try:
         ql = s.flat.quarterLength
         n_quavers = int(round(ql * 2))
@@ -514,23 +508,22 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
     return ScoreFingerprint(contour=contour, rhythm_quavers=quavers, tonic_pc=tonic_pc, mode_guess=mode_guess)
 
 
-def apply_fingerprint_to_key(fp: ScoreFingerprint, key: str, mode: str, raga: Optional[str], bars: int, register=(60,84)):
+def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[str], bars: int, register=(60,84)):
     """
-    Map the contour onto the target (raga or Western) scale; use uploaded rhythm if available.
+    Build an eighth-note resolution melody driven by a contour, but DO NOT set the rhythm here.
+    We always return bars*8 slots; rhythm is chosen by style (Pop/Latin/...).
     """
     scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
     tonic_pc = MAJOR_PC[key]
     start = choose_nearest_scale(60 + tonic_pc, scale)
     total_quavers = bars * 8
-    rhythm = (fp.rhythm_quavers[:total_quavers] if fp.rhythm_quavers
-              else [1] * total_quavers)
 
     out = [start]
     ci = 0
     while len(out) < total_quavers:
         step = 0
-        if ci < len(fp.contour):
-            c = fp.contour[ci]
+        if ci < len(fp_contour):
+            c = fp_contour[ci]
             step = -2 if c <= -2 else (2 if c >= 2 else c)
         candidates = step_options(out[-1], scale) or [out[-1]]
         target = out[-1] + step
@@ -540,7 +533,7 @@ def apply_fingerprint_to_key(fp: ScoreFingerprint, key: str, mode: str, raga: Op
 
     tonic_candidates = [m for m in scale if m % 12 == tonic_pc]
     out[-1] = min(tonic_candidates, key=lambda m: abs(m - out[-1]))
-    return out[:total_quavers], rhythm[:total_quavers]
+    return out[:total_quavers]
 
 
 # -------------------- UI --------------------
@@ -562,13 +555,13 @@ with st.sidebar:
 
 col1, col2 = st.columns(2)
 
-# ---- Key & Mode as dropdowns (fixes old bug) ----
+# Key & Mode dropdowns (prevents “fall back to C”)
 key_input = col1.selectbox("Key", KEYS_CANON, index=KEYS_CANON.index("C"), key="ui_key")
 mode_input = col2.selectbox("Mode", ["major","harmonic_minor","natural_minor"], index=0, key="ui_mode")
 
-# ---- New: Carnatic Raga (optional) ----
-raga_input = st.selectbox("Carnatic Raga (optional)", RAGA_LIST, index=0,
-                          help="Choose a raga to transform the score. If 'None', Western mode is used.")
+# Carnatic Raga (optional)
+raga_input = st.selectbox("Carnatic Raga (optional)", ["None (use Western mode)"] + list(RAGA_DEGREES.keys()), index=0,
+                          help="Choose a raga to constrain pitch material. Rhythm still comes from Arrangement Style.")
 
 style = st.selectbox("Arrangement Style", list(STYLE_PATTERNS.keys()), index=2)
 species = st.selectbox("Counterpoint Species (counter part)", ["1","2","3","4","5","Classical"], index=2)
@@ -586,7 +579,7 @@ chosen = st.multiselect("Pick instruments (first lead carries melody)", availabl
                         default=["Flute","Reed Section","Double Bass","Strings Pad","Piano Pad"])
 
 st.markdown("#### Optional: upload a reference score (MusicXML or MIDI)")
-upload = st.file_uploader("Use an existing score as a guide (we'll learn its contour/rhythm).",
+upload = st.file_uploader("We’ll learn the melodic contour; rhythm always follows your Arrangement Style.",
                           type=["xml","musicxml","mxl","mid","midi"])
 
 fp: Optional[ScoreFingerprint] = None
@@ -594,7 +587,7 @@ if upload is not None and _HAS_M21:
     try:
         fp = analyze_upload(upload.read(), upload.name)
         if fp:
-            st.success("Score parsed. We'll guide the lead line using its contour & rhythm.")
+            st.success("Score parsed. We'll guide the lead line using its contour (style keeps the rhythm).")
     except Exception as e:
         st.error(f"Unable to parse uploaded score: {e}")
 
@@ -611,11 +604,10 @@ if st.button("Generate Score"):
     if not any(i["role"]=="lead" for i in insts):
         insts[0]["role"]="lead"
 
-    # Lead (guided if fingerprint present)
+    # Lead (contour-guided if fingerprint present) — rhythm from STYLE
     lead_inst = next(i for i in insts if i["role"]=="lead")
     if fp is not None:
-        lead_slots, lead_quavers = apply_fingerprint_to_key(fp, key, mode, raga, bars_eff, register=lead_inst["range"])
-        rhythms["lead"] = lead_quavers[:bars_eff*8]
+        lead_slots = contour_to_slots(fp.contour, key, mode, raga, bars_eff, register=lead_inst["range"])
     else:
         lead_slots = generate_lead_eighths(key, mode, raga, bars_eff, register=lead_inst["range"])
 
@@ -623,7 +615,7 @@ if st.button("Generate Score"):
     for inst in insts:
         role = inst["role"]
         if role == "lead":
-            rhythm = rhythms.get("lead", rhythms["lead"])
+            rhythm = rhythms["lead"]  # always style rhythm
             slots = lead_slots[:bars_eff*8]
         elif role == "counter":
             rhythm = rhythms["counter"]
