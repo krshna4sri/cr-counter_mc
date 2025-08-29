@@ -1,0 +1,151 @@
+🎼 Best Practices for Using the CR-Counter App
+
+This guide explains how to use, when to use, and what to use within the app for best results.
+
+1. Choosing Key, Mode, and Raga
+
+Key: Pick the tonic (starting note) for your arrangement.
+
+Use C, G, F, etc. if you want traditional Western tonality.
+
+Mode:
+
+Available only when no Carnatic Raga is chosen.
+
+Use Major for bright, consonant music, Natural Minor for darker moods, and Harmonic Minor for classical/ethnic flavors.
+
+Raga:
+
+If selected, it overrides Western modes and controls the pitch material.
+
+Pick when exploring Indian/Carnatic tonalities.
+
+The app automatically disables Mode here (best to avoid confusion).
+
+✅ Best practice:
+
+Use Mode for Western tonal music.
+
+Use Raga for Carnatic/Indian melodic exploration.
+
+2. Arrangement Style
+
+Defines the rhythmic feel and texture of your arrangement.
+
+Examples:
+
+Pop / Rock → predictable, catchy rhythmic patterns.
+
+Jazz / R&B → syncopation, more motion.
+
+World / Classical → traditional counterpoint-like textures.
+
+Styles only affect rhythm & accompaniment, not the pitch content.
+
+✅ Best practice: Pick a style that matches your intended genre; experiment to see how it interacts with Western or Carnatic scales.
+
+3. Counterpoint Species
+
+Controls how the counter line interacts with the lead.
+
+Species types:
+
+1st Species → one note per bar (simple, meditative).
+
+2nd / 3rd Species → more motion, stepwise interactions.
+
+4th Species → suspensions and resolutions.
+
+5th / Classical → mixed/realistic counterpoint.
+
+✅ Best practice:
+
+Use Species 1–2 for calm, simple arrangements.
+
+Use Species 3–5 for more elaborate, expressive textures.
+
+4. Bars, Length & Tempo
+
+Bars (length): More bars = longer music.
+
+Target Tokens: Fine-tune exact number of eighth notes.
+
+Tempo: Controls playback speed (BPM).
+
+✅ Best practice:
+
+Start small (8–16 bars) for testing.
+
+Expand once you’re happy with the sound.
+
+Keep Tempo 90–110 BPM for most counterpoint styles; adjust higher for dance/Latin.
+
+5. Instrument Selection
+
+Choose from Lead, Counter, Bass, and Pad instruments.
+
+Roles matter:
+
+Lead: Carries the melody (always required).
+
+Counter: Provides counterpoint line.
+
+Bass: Root motion (tonal grounding).
+
+Pad: Sustains harmony.
+
+✅ Best practice:
+
+Always select at least one Lead.
+
+Use Bass + Pad for fuller texture.
+
+Add Counter for interplay.
+
+6. Reference Score Upload
+
+Upload a MIDI or MusicXML file to guide the lead contour.
+
+Rhythm still follows chosen style.
+
+Useful for adapting or reimagining existing themes.
+
+✅ Best practice: Upload a melody if you want to preserve character, but let the app handle rhythm/harmony automatically.
+
+7. Output & Export
+
+MusicXML → Open in MuseScore, Sibelius, Finale for editing/printing.
+
+MIDI → Load into DAWs (Logic, FL Studio, Ableton) for production.
+
+Audio Preview → Quick check of first 4 bars, not polished sound.
+
+✅ Best practice:
+
+Use MusicXML for notation work.
+
+Use MIDI for DAW production.
+
+Treat audio preview only as a rough sketch.
+
+8. Randomness & Seeds
+
+Random seed ensures reproducibility.
+
+Same seed + same settings = identical score.
+
+✅ Best practice: Fix a seed if you want to refine a variation; leave 0 for fresh output each time.
+
+🌟 Quick Recipes
+
+Western Classical Style:
+
+Key = C, Mode = Major, Style = Classical, Species = 4/5, Instruments = Violin + Viola + Cello + Piano Pad.
+
+Carnatic Fusion:
+
+Key = D, Raga = Kalyani, Style = Jazz/World, Instruments = Flute + Reed + Strings Pad.
+
+Pop Groove:
+
+Key = G, Mode = Major, Style = Pop, Instruments = Flute (lead) + Double Bass + Piano Pad.
