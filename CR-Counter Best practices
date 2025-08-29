@@ -1,0 +1,139 @@
+What each control is for
+
+Key (dropdown): Sets tonic/root. Use this for transposition and to match singers/instruments.
+
+Mode vs. Raga:
+
+Raga = None: You’re in Western harmony. Then Mode (major / natural minor / harmonic minor) defines the scale.
+
+Raga selected: Raga constrains pitch; Mode is ignored (disabled). Use this for Carnatic colors over any groove.
+
+Arrangement Style: Decides rhythm/groove patterns (Pop, Latin, Jazz, etc.). It does not change the scale—only the time feel.
+
+Species (counterpoint): How the counter line moves against the lead.
+
+1st species = long notes, consonant; 2nd/3rd/4th/5th add motion/suspension. Use 1/2 for simple textures, 3–5 for busier interplay.
+
+Bars / Target length: Total form length. Use Target length (eighths) to get exact token counts.
+
+Tempo: Obvious—also affects audio preview length.
+
+Random seed: Set to a number for reproducible results; leave at 0 to “roll the dice” each time.
+
+Instruments: First chosen lead carries the melody; add counter, bass, and pad for depth. Ranges are enforced.
+
+When to use Mode vs. Raga
+
+Pop/film/game underscore: Usually Raga = None, pick Mode to taste (major for bright, natural minor for moody, harmonic minor for exotic/tense).
+
+Carnatic flavor on a Western groove: Pick your Raga (e.g., Hindolam), then any Arrangement Style (Pop/Latin/etc.). Raga locks pitch; style brings the feel.
+
+Authentic Carnatic scaffolding: Choose Raga + Classical style or sparse 1st/2nd species and slower Tempo.
+
+Uploading a reference score (contour learning)
+
+Upload monophonic lead line in MusicXML or MIDI. The app:
+
+Learns melodic contour (up/down tendencies),
+
+Keeps your selected Style’s rhythm (it won’t copy the uploaded rhythm).
+
+Good sources: a plain vocal line, flute/violin melody, or a single-staff MIDI track.
+
+Avoid dense polyphony or chords—fingerprinting gets noisy.
+
+Choosing a Style (quick recipes)
+
+Pop: steady quarters in lead/bass; good for hooks and clean demos.
+
+Latin: clave-like syncopation; adds life to pentatonic ragas (e.g., Mohanam).
+
+Jazz: more off-beats; pairs well with Dorian/Kharaharapriya.
+
+R&B/Dance: busier bass; works with minor scales and pentatonics.
+
+Classical: neutral/legato base; great for species practice.
+
+Raga pointers (pitch palettes)
+
+Hindolam (S G2 M1 D1 N3): [0, 3, 5, 8, 11]. Lyrical; try Pop @ 84–100 BPM or World slow.
+
+Mohanam: major pentatonic—unfailingly melodic for ads/themes.
+
+Harikambhoji (Mixolydian): bright with ♭7; country/rock vibes.
+
+Keeravani (harmonic minor): dramatic; pairs with Classical/Jazz.
+
+Revati / Suddha Saveri: fewer notes → strong motifs; keep Species 1/2 and clear rhythms.
+
+Counterpoint species—how to pick
+
+1st: Long drones/dyads; safe under dialog.
+
+2nd/3rd: Motion without clutter; good mid-tempo grooves.
+
+4th: Suspensions; feels classical/emotional.
+
+5th: Mixed patterns; “active” contrapuntal texture.
+
+Instrumentation tips
+
+Keep at least one lead, one bass, and one pad/counter.
+
+Stay inside the pre-set ranges to avoid “jumps” (the app clamps to range, but better to choose sensibly).
+
+For clarity: Lead = Flute/Violin, Counter = Clarinet/Reeds, Bass = Double Bass/Cello, Pad = Strings/Piano Pad.
+
+Workflow: preview → export → DAW
+
+Generate and listen to the Audio preview (first 4 bars). It’s a simple sine synth—melodic accuracy, not production quality.
+
+If the vibe is right, Download MIDI:
+
+Import into your DAW, set instruments (GM programs in the file are only hints).
+
+Quantize to eighths/quarters (or keep humanization if you like).
+
+Add velocity curves, articulations, reverb.
+
+For notation, Download MusicXML and open in MuseScore / Dorico / Sibelius for engraving.
+
+Getting results that “sound like the raga”
+
+Make sure Raga is selected (Mode will be disabled).
+
+Keep melodic leaps small—the engine prefers stepwise intervals, but instrument ranges and contour guidance matter.
+
+If a line still feels “off”, lower tempo and try Species 1 or 2; dense rhythms can disguise raga flavor.
+
+Reproducibility & exploration
+
+Use a fixed Random seed when you like an outcome and want to tweak just one thing (e.g., tempo).
+
+Change seed to explore alternates with the same settings.
+
+Troubleshooting
+
+“It still sounds Western”: Check Raga ≠ None; try a sparser species and slower tempo.
+
+Wrong key signatures in XML: Key comes from dropdown; raga pitches are enforced note-by-note. That’s normal (notation shows key + accidentals).
+
+Upload error: Use a monophonic MIDI/MusicXML; avoid large DAW exports with tempo maps and multiple tracks.
+
+Audio preview too short/long: It’s always first 4 bars; increase Bars or Tempo for different feel.
+
+Sensible defaults
+
+Bars: 16–32 for quick drafts; 64+ for full cues.
+
+Tempo: Pop 92–112, Latin 96–120, R&B 80–96, Jazz 110–140, Classical 72–96.
+
+Instruments: Start with Lead + Bass + Pad; add Counter after it’s working.
+
+Versioning & sharing
+
+Keep your .py in git; store seeds and settings in commit messages.
+
+Include exported MIDI alongside MusicXML so performers and DAWs both have usable files.
+
+If you ever feel the melody isn’t matching your intention, upload a short reference line (even 8 bars) and let the contour steer the generator—then keep the style/raga you want.
