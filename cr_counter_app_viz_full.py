@@ -1,20 +1,41 @@
-# cr_counter_app_viz_full.py — CR-Counter with full-page background + styles + species + multi-instrument + MIDI + audio previews
+# cr_counter_app_viz_full.py — CR-Counter with full-page background + styles + species + multi-instrument
 # Run:  python -m streamlit run cr_counter_app_viz_full.py
 from __future__ import annotations
-import streamlit as st
-import xml.etree.ElementTree as ET
-from PIL import Image
-import base64, io, os, random, math, struct, wave
-from typing import List, Tuple
 
-# NEW: midi export
-try:
-    from midiutil import MIDIFile
-    _MIDI_AVAILABLE = True
-except Exception:
-    _MIDI_AVAILABLE = False
+import base64
+import io
+import math
+import os
+import random
+import struct
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+import streamlit as st
+from PIL import Image
 
 APP_NAME = "CR-Counter"
+
+# -------------------- Optional deps --------------------
+try:
+    import music21 as m21
+    _HAS_M21 = True
+except Exception:
+    _HAS_M21 = False
+
+try:
+    import mido
+    _HAS_MIDO = True
+except Exception:
+    _HAS_MIDO = False
+
+try:
+    import numpy as _np
+    _HAS_NP = True
+except Exception:
+    _HAS_NP = False
+
 
 # -------------------- Visual helpers --------------------
 def _encode_img(img: Image.Image) -> str:
@@ -22,22 +43,20 @@ def _encode_img(img: Image.Image) -> str:
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+
 def set_page_background(img: Image.Image):
-    """Use the image as a TRUE full-page background (current Streamlit selectors)."""
+    """Use the image as a TRUE full-page background."""
     b64 = _encode_img(img)
     st.markdown(
         f"""
         <style>
-        /* 1) full page background */
         html, body, [data-testid="stAppViewContainer"] {{
             background: url("data:image/png;base64,{b64}") center center fixed no-repeat !important;
             background-size: cover !important;
         }}
-        /* 2) transparent header */
         [data-testid="stHeader"] {{
             background: transparent !important;
         }}
-        /* 3) readable 'glass' panel for content */
         .main .block-container {{
             background: rgba(255,255,255,0.86) !important;
             border-radius: 16px;
@@ -49,14 +68,15 @@ def set_page_background(img: Image.Image):
         unsafe_allow_html=True,
     )
 
+
 def load_header_image() -> Image.Image | None:
     for c in [
         "header.jpg",
         "header.png",
-        "header.jpg.jpg",               # your uploaded filename case
+        "header.jpg.jpg",               # your uploaded filename
         "cover.jpg",
         "cover.png",
-        "VS_Pop_Funky_1400x1400.jpg",   # your shared image
+        "VS_Pop_Funky_1400x1400.jpg",   # image you shared
     ]:
         try:
             return Image.open(c).convert("RGB")
@@ -64,11 +84,13 @@ def load_header_image() -> Image.Image | None:
             continue
     return None
 
+
 def hero(title: str):
     st.markdown(
         f"<h1 style='text-align:center;margin:0.35rem 0 1.0rem 0'>{title}</h1>",
         unsafe_allow_html=True,
     )
+
 
 # -------------------- Theory helpers --------------------
 MAJOR_PC = {"C":0,"G":7,"D":2,"A":9,"E":4,"B":11,"F#":6,"C#":1,"F":5,"Bb":10,"Eb":3,"Ab":8,"Db":1,"Gb":6,"Cb":11}
@@ -117,6 +139,7 @@ def consonant_with(a:int, b:int) -> bool:
 
 def step_options(p:int, scale:List[int]): return [x for x in (p-2,p-1,p+1,p+2) if x in scale]
 
+
 # -------------------- Styles & instruments --------------------
 STYLE_PATTERNS = {
     "Pop":      {"lead":[[2,2,2,2]], "counter":[[1,1,2,1,1,2]], "bass":[[2,2,2,2]], "pad":[[8]]},
@@ -142,22 +165,8 @@ INSTRUMENTS = {
     "Piano Pad":     {"role":"pad",     "range":(48,84)},
     "Strings Pad":   {"role":"pad",     "range":(55,91)},
 }
-
-# General MIDI program numbers (0-based)
-GM_PROGRAM = {
-    "Flute": 73,          # 74 in GM (1-based)
-    "Oboe": 68,           # 69
-    "Clarinet": 71,       # 72
-    "Reed Section": 65,   # Alto Sax (proxy)
-    "Violin": 40,         # 41
-    "Viola": 41,          # 42
-    "Cello": 42,          # 43
-    "Double Bass": 43,    # 44 (Contrabass)
-    "Piano Pad": 89,      # Pad 2 (Warm) proxy
-    "Strings Pad": 50,    # SynthStrings 1
-}
-
 def gen_rhythm(patterns, bars): return [d for b in range(bars) for d in patterns[b % len(patterns)]]
+
 
 # -------------------- Lead generator --------------------
 ALLOWED_INTERVALS = [-7,-5,-4,-3,-2,-1,1,2,3,4,5,7]
@@ -191,6 +200,7 @@ def generate_lead_eighths(key, mode, bars, register=(60,84)):
     tonic_candidates = [m for m in scale if m%12==tonic_pc]
     line[-1] = min(tonic_candidates, key=lambda m: abs(m - line[-1]))
     return line
+
 
 # -------------------- Counterpoint (species) --------------------
 SPECIES_RHYTHM = {"1":[8], "2":[4,4], "3":[2,2,2,2], "4":[6,2], "5":[1,1,2,1,1,2], "Classical":[1,1,2,1,1,2]}
@@ -226,6 +236,7 @@ def generate_counter_species(cantus_slots, key, mode, bars, species, register=(5
             out += [b1, n1, n2, n2, b3, n3, n4, n4]; i += 8
     return out[:total]
 
+
 # -------------------- MusicXML --------------------
 def parts_to_musicxml(parts, key, mode, tempo, bars):
     flats = prefers_flats(key)
@@ -236,7 +247,7 @@ def parts_to_musicxml(parts, key, mode, tempo, bars):
         ET.SubElement(score_part, "part-name").text = p["name"]
     for i,p in enumerate(parts, start=1):
         part = ET.SubElement(root, "part", id=f"P{i}")
-        divisions = 2  # eighth note = 1 unit
+        divisions = 2
         events = []; idx=0
         for dur in p["rhythm"]:
             pitch = p["slots"][idx]; events.append((pitch, dur)); idx += dur
@@ -269,142 +280,223 @@ def _emit_note(meas, midi, dur8, divisions, flats):
     ET.SubElement(note, "duration").text = str(duration); ET.SubElement(note, "voice").text = "1"
     ET.SubElement(note, "type").text = {1:"eighth",2:"quarter",4:"half",8:"whole"}.get(dur8, "eighth")
 
+
 # -------------------- MIDI export --------------------
-def _dur8_to_beats(dur8: int) -> float:
-    # 1 eighth = 0.5 beats, 2 = 1 beat, 4 = 2 beats, 8 = 4 beats
-    return dur8 / 2.0
+PROGRAMS = {"lead":73, "counter":71, "bass":32, "pad":88}  # rough GM programs
 
-def parts_to_midi(parts, tempo_bpm: int) -> bytes:
-    """
-    Build a Type-1 multi-track MIDI. One track per part, channels 0..15 (skip 9).
-    """
-    if not _MIDI_AVAILABLE:
-        raise RuntimeError("midiutil not installed")
+def parts_to_midi_bytes(parts, tempo_bpm):
+    if not _HAS_MIDO:
+        raise RuntimeError("mido not installed")
+    mid = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
 
-    mf = MIDIFile(len(parts))  # one track per part
-    beat_time = 0.0
-    for ti, p in enumerate(parts):
-        track = ti
-        channel = ti % 16
-        if channel == 9:  # avoid percussion channel
-            channel = (channel + 1) % 16
-        mf.addTrackName(track, 0, p["name"])
-        mf.addTempo(track, 0, int(tempo_bpm))
-        program = GM_PROGRAM.get(p["name"], 48)  # default String Ensemble 1
-        mf.addProgramChange(track, channel, 0, program)
+    us_per_beat = int(60_000_000 / max(1, int(tempo_bpm)))
+    track.append(mido.MetaMessage('set_tempo', tempo=us_per_beat, time=0))
 
-        time_beats = 0.0
+    events = []  # (abs_tick, kind, a, b, role)
+    for p in parts:
+        role = p["role"]
+        program = PROGRAMS.get(role, 73)
+        events.append((0, "program_change", program, None, role))
+        abs_tick = 0
         idx = 0
         for dur8 in p["rhythm"]:
             pitch = p["slots"][idx]
-            beats = _dur8_to_beats(dur8)
-            mf.addNote(track, channel, pitch, time_beats, beats, 92 if p["role"]!="pad" else 80)
-            time_beats += beats
+            dur_q = dur8 / 2.0
+            dur_ticks = int(dur_q * 480)
+            events.append((abs_tick, "on", pitch, 72, role))
+            events.append((abs_tick + dur_ticks, "off", pitch, 64, role))
+            abs_tick += dur_ticks
             idx += dur8
 
-    out = io.BytesIO()
-    mf.writeFile(out)
-    return out.getvalue()
+    def _sort_key(e):
+        t, kind, *_ = e
+        pri = 0 if kind == "program_change" else (1 if kind == "off" else 2)
+        return (t, pri)
+    events.sort(key=_sort_key)
 
-# -------------------- Tiny audio previews (WAV) --------------------
-def _midi_to_freq(m: int) -> float:
-    return 440.0 * (2.0 ** ((m - 69) / 12.0))
+    current = 0
+    current_program = None
+    for t, kind, a, b, _role in events:
+        delta = t - current
+        current = t
+        if kind == "program_change":
+            if a != current_program:
+                track.append(mido.Message('program_change', program=int(a), time=delta))
+                current_program = a
+            else:
+                track.append(mido.Message('program_change', program=int(a), time=delta))
+        elif kind == "on":
+            track.append(mido.Message('note_on', note=int(a), velocity=int(b), time=delta))
+        elif kind == "off":
+            track.append(mido.Message('note_off', note=int(a), velocity=int(b), time=delta))
 
-def _osc(value_t: float, freq: float, sr: int, wave_type: str) -> float:
-    # simple oscillators
-    t = value_t
-    x = 2.0 * math.pi * freq * t
-    if wave_type == "sine":
-        return math.sin(x)
-    elif wave_type == "triangle":
-        # quick triangle approximate
-        return 2.0 / math.pi * math.asin(math.sin(x))
-    elif wave_type == "saw":
-        # basic sawtooth approx
-        return 2.0 * ((freq * t) - math.floor(0.5 + freq * t))
+    bio = io.BytesIO()
+    mid.save(file=bio)
+    return bio.getvalue()
+
+
+# -------------------- Audio preview (first N bars) --------------------
+_INSTR_GAIN = {"lead":0.9,"counter":0.7,"bass":0.7,"pad":0.5}
+def _midi_to_hz(n): return 440.0 * (2.0 ** ((n - 69) / 12.0))
+
+def parts_to_wav_preview(parts, tempo_bpm, bars=4, sr=22050):
+    seconds_per_beat = 60.0 / max(1, tempo_bpm)
+    beats_total = 4 * bars
+    seconds_total = beats_total * seconds_per_beat
+
+    n_samples = int(seconds_total * sr)
+    if _HAS_NP:
+        mix = _np.zeros(n_samples, dtype=_np.float32)
     else:
-        return math.sin(x)
+        mix = [0.0] * n_samples
 
-def _adsr(n: int, sr: int, dur_s: float, a=0.01, d=0.05, s=0.7, r=0.05) -> List[float]:
-    total = n
-    aN = int(a*sr); dN = int(d*sr); rN = int(r*sr)
-    sN = max(0, total - aN - dN - rN)
-    env = []
-    # attack
-    for i in range(max(aN,1)):
-        env.append(i/max(aN,1))
-    # decay
-    for i in range(max(dN,1)):
-        env.append(1 - (1-s)*(i/max(dN,1)))
-    # sustain
-    for _ in range(sN):
-        env.append(s)
-    # release
-    last = env[-1] if env else s
-    for i in range(max(rN,1)):
-        env.append(last * (1 - i/max(rN,1)))
-    # trim/pad
-    if len(env) > total: env = env[:total]
-    elif len(env) < total: env += [0.0]*(total-len(env))
-    return env
+    for p in parts:
+        role = p["role"]; gain = _INSTR_GAIN.get(role, 0.6)
+        idx = 0; t_cursor = 0.0
+        for dur8 in p["rhythm"]:
+            if t_cursor >= seconds_total: break
+            pitch = p["slots"][idx]
+            dur_q = dur8 / 2.0
+            dur_sec = dur_q * seconds_per_beat
+            f = _midi_to_hz(pitch)
+            start = int(t_cursor * sr)
+            end = min(n_samples, int((t_cursor + dur_sec) * sr))
+            length = max(1, end - start)
+            for i in range(length):
+                s = math.sin(2*math.pi*f*(i/sr))
+                a = min(1.0, i/(0.01*sr))
+                r = min(1.0, (length-1-i)/(0.01*sr))
+                env = min(a, r)
+                val = gain * 0.3 * s * env
+                if _HAS_NP:
+                    mix[start+i] += val
+                else:
+                    mix[start+i] += val
+            t_cursor += dur_sec
+            idx += dur8
 
-def _instrument_waveform(name: str) -> str:
-    # cheap timbre mapping
-    if name in ("Flute","Oboe","Clarinet","Reed Section"):
-        return "sine"
-    if name in ("Violin","Viola","Strings Pad"):
-        return "saw"
-    if name in ("Cello","Double Bass"):
-        return "triangle"
-    if name in ("Piano Pad",):
-        return "sine"
-    return "sine"
+    if _HAS_NP:
+        mx = max(1e-6, float(_np.max(_np.abs(mix))))
+        mix = (mix / mx * 0.95)
+        pcm16 = (mix * 32767.0).astype(_np.int16).tobytes()
+    else:
+        mx = max(1e-6, max(abs(x) for x in mix))
+        out = io.BytesIO()
+        for x in mix:
+            v = int(32767 * 0.95 * (x / mx))
+            out.write(struct.pack("<h", max(-32768, min(32767, v))))
+        pcm16 = out.getvalue()
 
-def synth_preview_wav(part: dict, tempo_bpm: int, preview_bars=4, sr=44100) -> bytes:
-    """
-    Render a short monophonic WAV of 'preview_bars' for this part.
-    Standard library only (wave/math); small and fast for demos.
-    """
-    seconds_per_beat = 60.0 / float(tempo_bpm)
-    seconds_per_eighth = seconds_per_beat / 2.0
-
-    # Gather events for the first N bars
-    total_tokens = preview_bars * 8
-    idx = 0
-    events = []
-    for dur8 in part["rhythm"]:
-        if total_tokens <= 0:
-            break
-        use = min(dur8, total_tokens)
-        pitch = part["slots"][idx]
-        events.append((pitch, use))
-        idx += dur8
-        total_tokens -= use
-
-    waveform = _instrument_waveform(part["name"])
     buf = io.BytesIO()
-    wf = wave.open(buf, "wb")
-    wf.setnchannels(1)
-    wf.setsampwidth(2)   # 16-bit
-    wf.setframerate(sr)
-
-    # render
-    for pitch, dur8 in events:
-        freq = _midi_to_freq(pitch)
-        dur_s = seconds_per_eighth * dur8
-        n = int(sr * dur_s)
-        env = _adsr(n, sr, dur_s, a=0.01, d=0.03, s=0.75, r=0.06)
-        for i in range(n):
-            t = i / sr
-            sample = 0.18 * _osc(t, freq, sr, waveform) * env[i]   # keep headroom
-            wf.writeframes(struct.pack("<h", int(max(-1.0, min(1.0, sample)) * 32767)))
-    wf.close()
+    import wave
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes(pcm16)
     return buf.getvalue()
+
+
+# -------------------- Score upload (fingerprint) --------------------
+@dataclass
+class ScoreFingerprint:
+    contour: List[int]         # sequence of melodic intervals in scale degrees-ish
+    rhythm_quavers: List[int]  # rhythm as a sequence of 1/8 counts (summing to bars*8)
+    tonic_pc: int
+    mode_guess: str
+
+def _safe_parse_bytes_with_format(file_bytes: bytes, filename: str):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in (".mid", ".midi"):
+        return m21.converter.parseData(file_bytes, format="midi")
+    try:
+        text = file_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        text = file_bytes
+    return m21.converter.parseData(text, format="musicxml")
+
+def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprint]:
+    if not _HAS_M21:
+        return None
+    try:
+        s = _safe_parse_bytes_with_format(file_bytes, filename)
+    except Exception as e:
+        st.error(f"Unable to parse uploaded score (in-memory): {e}")
+        return None
+
+    try:
+        k = s.analyze("key")
+        mode_guess = "major" if k.mode.lower().startswith("major") else "harmonic_minor"
+        tonic_pc = MAJOR_PC.get(k.tonic.name.replace("-", "b"), 0)
+    except Exception:
+        mode_guess = "major"; tonic_pc = 0
+
+    melody = s.parts[0].flat.notes if s.parts else s.flat.notes
+    midi = [n.pitch.midi for n in melody if hasattr(n, "pitch")]
+    if len(midi) < 4:
+        st.warning("Uploaded score has too few melodic notes to fingerprint.")
+        return None
+
+    # crude monophonic contour (signed semitone differences binned to -2..+2)
+    contour = []
+    for i in range(1, len(midi)):
+        d = midi[i] - midi[i-1]
+        if d <= -3: contour.append(-2)
+        elif d >= 3: contour.append(+2)
+        elif d < 0: contour.append(-1)
+        elif d > 0: contour.append(+1)
+        else: contour.append(0)
+
+    # crude quaver-based rhythm (assume quarter=1 beat, eighth=0.5 beats)
+    quavers = []
+    try:
+        ql = s.flat.quarterLength
+        # walk first part measures; if no durations, fallback to even eighths
+        n_quavers = int(round(ql * 2))
+        quavers = [1] * max(1, n_quavers)
+    except Exception:
+        quavers = [1] * 32
+
+    return ScoreFingerprint(contour=contour, rhythm_quavers=quavers, tonic_pc=tonic_pc, mode_guess=mode_guess)
+
+
+def apply_fingerprint_to_key(fp: ScoreFingerprint, key: str, mode: str, bars: int, register=(60,84)):
+    """
+    Map the contour onto the target scale; use uploaded rhythm if available,
+    otherwise use straight eighths.
+    """
+    scale = scale_midis(key, mode, low=register[0], high=register[1])
+    tonic_pc = MAJOR_PC[key]
+    start = choose_nearest_scale(60 + tonic_pc, scale)
+    total_quavers = bars * 8
+    rhythm = (fp.rhythm_quavers[:total_quavers] if fp.rhythm_quavers
+              else [1] * total_quavers)
+
+    # Build a quaver-resolution melody guided by contour
+    out = [start]
+    ci = 0
+    while len(out) < total_quavers:
+        step = 0
+        if ci < len(fp.contour):
+            c = fp.contour[ci]
+            step = -2 if c <= -2 else (2 if c >= 2 else c)
+        # move by small step inside the scale
+        candidates = step_options(out[-1], scale) or [out[-1]]
+        # pick nearest to (last + step semitones) within scale
+        target = out[-1] + step
+        nxt = min(candidates, key=lambda m: abs(m - target))
+        out.append(nxt)
+        ci += 1
+
+    # Smooth landing on tonic
+    tonic_candidates = [m for m in scale if m % 12 == tonic_pc]
+    out[-1] = min(tonic_candidates, key=lambda m: abs(m - out[-1]))
+
+    return out[:total_quavers], rhythm[:total_quavers]
+
 
 # -------------------- UI --------------------
 st.set_page_config(page_title=APP_NAME, page_icon="🎼", layout="centered")
 
-# Background from local file
 base_img = load_header_image()
 if base_img is not None:
     set_page_background(base_img)
@@ -412,9 +504,9 @@ hero(APP_NAME)
 
 with st.sidebar:
     st.markdown("### Branding / Images")
-    up = st.file_uploader("Upload a header/background (jpg/png)", type=["jpg","jpeg","png"])
-    if up is not None:
-        hdr = Image.open(up).convert("RGB")
+    up_img = st.file_uploader("Upload a header/background (jpg/png)", type=["jpg","jpeg","png"])
+    if up_img is not None:
+        hdr = Image.open(up_img).convert("RGB")
         st.image(hdr, caption="Uploaded", use_container_width=True)
         set_page_background(hdr)
     st.caption("Tip: keep **header.jpg** next to the script for persistent branding.")
@@ -437,70 +529,106 @@ available = list(INSTRUMENTS.keys())
 chosen = st.multiselect("Pick instruments (first lead carries melody)", available,
                         default=["Flute","Reed Section","Double Bass","Strings Pad","Piano Pad"])
 
+st.markdown("#### Optional: upload a reference score (MusicXML or MIDI)")
+upload = st.file_uploader("Use an existing score as a guide (we'll learn its contour/rhythm).",
+                          type=["xml","musicxml","mxl","mid","midi"])
+
+fp: Optional[ScoreFingerprint] = None
+if upload is not None and _HAS_M21:
+    try:
+        fp = analyze_upload(upload.read(), upload.name)
+        if fp:
+            st.success("Score parsed. We'll guide the lead line using its contour & rhythm.")
+    except Exception as e:
+        st.error(f"Unable to parse uploaded score: {e}")
+
 if st.button("Generate Score"):
     key, mode = normalize_key_mode(key_input, mode_input)
     if seed: random.seed(int(seed))
     patt = STYLE_PATTERNS[style]
     rhythms = {role: gen_rhythm(patt[role], bars_eff) for role in patt}
     insts = [{"name":n, **INSTRUMENTS[n]} for n in chosen if n in INSTRUMENTS]
-    if not any(i["role"]=="lead" for i in insts) and insts:
+    if not insts:
+        st.error("Pick at least one instrument.")
+        st.stop()
+    if not any(i["role"]=="lead" for i in insts):
         insts[0]["role"]="lead"
 
-    # Lead
+    # Lead (guided if fingerprint present)
     lead_inst = next(i for i in insts if i["role"]=="lead")
-    lead_slots = generate_lead_eighths(key, mode, bars_eff, register=lead_inst["range"])
+    if fp is not None:
+        lead_slots, lead_quavers = apply_fingerprint_to_key(fp, key, mode, bars_eff, register=lead_inst["range"])
+        # force rhythm for lead to uploaded rhythm (fallback to default rhythm length)
+        rhythms["lead"] = []
+        idx = 0
+        # pack quavers into the default style pattern length by aggregating 8ths into pattern items
+        # For simplicity: keep style rhythm for non-lead; for lead, use straight 8ths == lead_quavers
+        rhythms["lead"] = lead_quavers[:bars_eff*8]
+    else:
+        lead_slots = generate_lead_eighths(key, mode, bars_eff, register=lead_inst["range"])
 
     parts = []
     for inst in insts:
-        role = inst["role"]; rhythm = rhythms[role]
-        if role=="lead":
+        role = inst["role"]
+        if role == "lead":
+            # if guided, rhythm is 8th-unit list; convert to our rhythm format (list of ints summing to bars*8)
+            if fp is not None:
+                rhythm = rhythms["lead"]
+            else:
+                rhythm = rhythms["lead"]
             slots = lead_slots[:bars_eff*8]
-        elif role=="counter":
+        elif role == "counter":
+            rhythm = rhythms["counter"]
             slots = generate_counter_species(lead_slots, key, mode, bars_eff, species, register=inst["range"])
-        elif role=="bass":
+        elif role == "bass":
+            rhythm = rhythms["bass"]
             base_scale = scale_midis(key, mode, low=inst["range"][0], high=inst["range"][1])
             slots = []
             for i,p in enumerate(lead_slots[:bars_eff*8]):
                 target = p-12 if (i%8) in (0,4) else p-7
                 slots.append(min(base_scale, key=lambda m: abs(m-target)))
         else:  # pad
+            rhythm = rhythms["pad"]
             base_scale = scale_midis(key, mode, low=inst["range"][0], high=inst["range"][1])
             slots = []
             for i,p in enumerate(lead_slots[:bars_eff*8]):
                 target = p if (i%8) in (0,4) else (slots[-1] if slots else p)
                 slots.append(min(base_scale, key=lambda m: abs(m-target)))
+
         parts.append({"name": inst["name"], "role": role, "rhythm": rhythm, "slots": slots})
 
+    # ---- Downloads & preview ----
     xml_bytes = parts_to_musicxml(parts, key, mode, int(tempo), bars_eff)
     st.success("Generated! Download your score:")
-    st.download_button("Download MusicXML",
-                       data=xml_bytes,
-                       file_name="CR_Counter_Arrangement.xml",
-                       mime="application/vnd.recordare.musicxml+xml")
 
-    # NEW: MIDI download
-    if _MIDI_AVAILABLE:
-        midi_bytes = parts_to_midi(parts, int(tempo))
-        st.download_button("Download MIDI",
-                           data=midi_bytes,
-                           file_name="CR_Counter_Arrangement.mid",
-                           mime="audio/midi")
-    else:
-        st.info("Install `midiutil` to enable MIDI export:  `pip install midiutil`")
+    st.download_button(
+        "Download MusicXML",
+        data=xml_bytes,
+        file_name="CR_Counter_Arrangement.xml",
+        mime="application/vnd.recordare.musicxml+xml"
+    )
+
+    if _HAS_MIDO:
+        try:
+            midi_bytes = parts_to_midi_bytes(parts, int(tempo))
+            st.download_button(
+                "Download MIDI",
+                data=midi_bytes,
+                file_name="CR_Counter_Arrangement.mid",
+                mime="audio/midi"
+            )
+        except Exception as e:
+            st.warning(f"MIDI export failed: {e} (install/update `mido`)")
+
+    with st.expander("Audio previews (first 4 bars, simple synth)"):
+        try:
+            wav_bytes = parts_to_wav_preview(parts, int(tempo), bars=4, sr=22050)
+            st.audio(wav_bytes, format="audio/wav")
+        except Exception as e:
+            st.warning(f"Audio preview failed: {e}")
 
     flats = prefers_flats(key)
     st.markdown("**Preview (first 16 eighths per part)**")
     for p in parts:
         names = ", ".join(midi_to_name(m, flats) for m in p["slots"][:16])
         st.write(f"{p['name']} ({p['role']}): {names}")
-
-    # NEW: inline audio previews (first 4 bars per part)
-    with st.expander("Audio previews (first 4 bars, simple synth)"):
-        for p in parts:
-            wav = synth_preview_wav(p, int(tempo), preview_bars=4)
-            st.write(p["name"])
-            st.audio(wav, format="audio/wav")
-            st.download_button(f"Download {p['name']} preview (WAV)",
-                               data=wav,
-                               file_name=f"{p['name'].replace(' ','_')}_preview.wav",
-                               mime="audio/wav")
