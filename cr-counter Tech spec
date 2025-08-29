@@ -1,0 +1,302 @@
+CR-Counter — Technical Specification
+1) Purpose & Scope
+
+CR-Counter is a Streamlit application that generates multi-part musical arrangements using:
+
+A Markov-like melodic engine for the lead/cantus.
+
+Species counterpoint (1–5 + “Classical”) for the counter line.
+
+Simple style patterns (Pop/Jazz/R&B/Latin/etc.) to drive per-part rhythms.
+
+Optional fugue-inspired subject seeding for selected keys (e.g., C minor).
+
+Export to MusicXML for use in MuseScore/Finale/Dorico/Sibelius.
+
+Out of scope (current version)
+
+Full Fux rule checker, harmonic analysis, voice-leading error detection.
+
+MIDI/audio rendering (MusicXML only).
+
+Internet lookups or score ingestion (all offline).
+
+2) Users & Goals
+
+Composers / educators: prototype counterpoint ideas, print/share notation.
+
+Developers: extend patterns, keys, or add new engines without external services.
+
+Students: explore species counterpoint and arrangement styles interactively.
+
+3) System Architecture
+3.1 Components
+
+UI Layer (Streamlit)
+Inputs (key, mode, bars, species, style, instruments, seed, branding image) and outputs (preview text + MusicXML download).
+
+Theory/Engine Layer (Python)
+
+Scale/Key utilities: normalize keys/modes, pitch name/midi mapping.
+
+Lead generator: Markov interval sampler; optional subject seeding.
+
+Counterpoint generator: species 1–5 + Classical rhythm/placement & consonance checks.
+
+Arrangement patterns: per-role rhythm patterns by style.
+
+MusicXML writer: turns rhythm + pitch slots into MusicXML.
+
+Branding/Theme Layer
+Full-page background image + “glass” content container via CSS injection.
+
+3.2 Data flow
+
+User input → normalized (key/mode, bars, seed).
+
+Style → role rhythms per bar.
+
+Fugue seed (optional) → apply a short subject to the lead opening.
+
+Lead generation → Markov expands to bars * 8 eighth-note tokens.
+
+Counter/bass/pads → generated from lead + role logic.
+
+MusicXML build → mapped from (slots, rhythms) to measures/events.
+
+UI preview (first 16 eighths) + MusicXML download.
+
+4) Core Algorithms
+4.1 Scale & pitch mapping
+
+Key to pitch class: MAJOR_PC[key].
+
+Mode diatonic set: Major / Natural Minor / Harmonic Minor.
+
+Scale domain: [low, high] MIDI range filtered to allowed pitch classes.
+
+Name ↔ MIDI: step/alter/octave functions; flat/sharp preference from key.
+
+4.2 Lead (Markov-like)
+
+Allowed intervals: {-7,-5,-4,-3,-2,-1,+1,+2,+3,+4,+5,+7}.
+
+Weights: favor steps; de-weight repeated leaps; add leap recovery bias (encourage contrary step after a leap).
+
+Start: tonic near the middle of instrument register.
+
+End: cadence on tonic (closest tonic-class pitch).
+
+Subject seeding (optional):
+If (key, mode) exists in FUGUE_SEEDS, map subject intervals to midis near tonic → prepend to lead before Markov continuation.
+
+Pseudocode
+
+line = subject or [nearest_tonic()]
+prev_iv = 0
+while len(line) < total_eighths:
+    iv = sample_interval_with_recovery(prev_iv)
+    candidate = line[-1] + iv
+    next_note = nearest_scale_pitch(candidate)
+    line.append(next_note)
+    prev_iv = iv
+line[-1] = closest_tonic(line[-1])
+
+4.3 Counterpoint (Species)
+
+Processes bars * 8 lead slots.
+
+Consonance by semitone set {0,3,4,5,7,8,9} (unison/3rds/4th/5th/6ths/oct).
+
+Species rhythm shapes per bar:
+
+S1: [8] (whole)
+
+S2: [4,4] (half + step)
+
+S3: [2,2,2,2] (quarters w/ steps between blocks)
+
+S4: [6,2] (suspension flavor)
+
+S5/Classical: [1,1,2,1,1,2] (mixed)
+
+Picks the closest consonant; step options for inner notes.
+
+4.4 Style rhythms (Arrangement)
+
+STYLE_PATTERNS maps each style to role rhythm arrays per bar (lead/counter/bass/pad).
+
+Bass heuristic: choose nearest to lead[i]-12 on downbeats (i%8 in {0,4}), else lead[i]-7.
+
+Pads: sustain scale tones; keep prior pad on non-strong beats.
+
+4.5 MusicXML writer
+
+Score structure: PartList → Parts → Measures.
+
+Attributes: Divisions=2 (eighth=1), Key (fifths + mode), Time (4/4), Clef=G.
+
+Tempo: direction/metronome tag on measure 1.
+
+Measure packing: split notes when they cross bar boundaries (used + dur > 8).
+
+5) Data Structures
+INSTRUMENTS = {
+  "Flute": {"role":"lead","range":(72,96)},
+  # "counter" / "bass" / "pad" roles...
+}
+
+STYLE_PATTERNS = {
+  "R&B": {"lead":[[1,1,2,1,1,2]], "counter":[[1,1,1,1,1,1,2]],
+          "bass":[[2,1,1,2,2]], "pad":[[8]]},
+  ...
+}
+
+FUGUE_SEEDS = {
+  ("C","harmonic_minor"): {
+    "name": "C minor (Bach-style)",
+    "intervals": [0,2,3,5,7,5,3,2,0,-2,-3,-5,-7,-5,-3,-2],
+    "rhythm": [1]*16
+  },
+  ...
+}
+
+6) User Interface & UX
+
+Inputs: Key (text), Mode (select), Arrangement Style (select), Species (select), Bars slider (4–128), optional Eighth-note target, Tempo slider, Random seed, Instruments (multi select), Use fugue reference (checkbox).
+
+Branding: full-page background image; optional sidebar uploader.
+
+Outputs: success message, MusicXML download, preview of first 16 eighths per part.
+
+7) Configuration
+
+Preview length: currently 16 eighths; can be made configurable.
+
+Divisions/time signature: fixed 4/4, divisions=2 (eighth base) in this version.
+
+Key/mode names: accept enharmonics (#/b); “minor” coerced to harmonic_minor.
+
+8) Non-functional Requirements
+
+Performance:
+
+128 bars × 4 parts should generate in < 2s on a modern laptop (Python only).
+
+Portability: Python 3.9+ (no system libs); offline.
+
+Reliability: deterministic if seed set.
+
+Security/Privacy: no network calls; user image stays local.
+
+9) Dependencies
+
+Python stdlib: random, math, xml.etree.ElementTree, io, base64, os.
+
+External: streamlit>=1.36, Pillow>=10.0.
+
+10) Error Handling & Logging
+
+UI guards: if no instruments selected, coerce first to lead.
+
+Subject availability: show an info message when a seed is used.
+
+MusicXML generation: split at measure boundaries; fail-safe defaults for attributes.
+
+Streamlit logs to console; no persistent logs by default.
+
+11) Testing Strategy
+
+Unit tests (theory):
+
+scale_midis() returns only allowed pitch classes.
+
+midi_to_name() respects flats for flat keys.
+
+Lead generator ends on tonic.
+
+Species generator returns len == bars*8.
+
+Consonance set validation.
+
+Property tests:
+
+No out-of-range notes for selected instrument range.
+
+MusicXML parses with an external validator (optional CI job).
+
+UI smoke tests: app runs, button generates XML, file non-empty.
+
+12) Packaging & Deployment
+
+Local run: python -m streamlit run cr_counter_app_viz_full.py
+
+Docker (optional future): base python image; expose 8501.
+
+GitHub Pages: not applicable (Streamlit app needs a runner).
+
+Streamlit Community Cloud: add repo + app file, set Python version and reqs.
+
+13) Versioning & Branching
+
+SemVer (MAJOR.MINOR.PATCH):
+
+New engines or format changes → minor/major.
+
+Bugfixes / perf → patch.
+
+main (stable), dev (feature staging), PRs with checks (lint/tests).
+
+14) Licensing
+
+Choose MIT (permissive) or GPL-3.0 (strong copyleft).
+
+Current repo shows LGPL-2.1; acceptable but more typical for libraries than apps.
+
+15) Risks & Mitigations
+
+Musical validity: heuristics may create occasional awkward lines → future rule weighting (parallel 5ths/8ves detection).
+
+Large scores in UI: long textual previews become heavy → keep preview capped; rely on MusicXML for full viewing.
+
+Enharmonic spellings: flat vs sharp selection may look odd in some keys → expand logic for better spelling rules.
+
+16) Roadmap
+
+Subject libraries for more keys; imitation entries in other parts (stagger onset).
+
+MIDI export and optional synth playback.
+
+Harmony inference → triads/7ths for pads; bass voice-leading rules.
+
+Strict counterpoint checker (parallel intervals, voice ranges, spacing).
+
+Custom time signatures and divisions.
+
+Expand instrument sets + clef selection per instrument.
+
+17) Acceptance Criteria
+
+Given any valid input set, the app:
+
+Generates lead/counter/bass/pads of length bars*8.
+
+Produces a valid MusicXML that opens in MuseScore.
+
+Ends the lead line on a tonic-class pitch.
+
+Respects instrument MIDI ranges (no out-of-range notes).
+
+Shows a preview (≥ 16 eighths per part) and a functional download button.
+
+When “Use fugue reference” is ON and known, the first 16 eighths of the lead follow the seeded subject contour.
+
+18) Glossary
+
+Eighth-note token: one subdivision; 8 tokens = 1 bar (4/4).
+
+Species counterpoint: educational rhythmic/counterpoint styles (S1–S5).
+
+Subject: leading motif in a fugue; here, a short interval plan used as seed.
+
+Divisions: MusicXML rhythmic resolution; here 2 meaning eighth = 1 unit.
