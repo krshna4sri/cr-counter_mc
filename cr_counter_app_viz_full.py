@@ -1,9 +1,8 @@
 # cr_counter_app_viz_full.py — CR-Counter with full-page background + styles + species + multi-instrument + Raga modes
-# Improvements:
-#  - Key is a dropdown (canonical keys) — prevents silent fallbacks
-#  - If a Carnatic Raga is selected, Mode is disabled and ignored (clear UX)
-#  - Hindolam corrected to [0,3,5,8,11]
-#  - Arrangement Style always controls rhythm, even with upload-guided contour
+# Fixes in this version:
+#  - Lead always starts on the actual tonic of the chosen Key/Mode/Raga (closest to middle register), not C
+#  - Works for Western modes and all provided Ragas
+#  - Hides/disables Mode whenever a Carnatic Raga is selected (engine already ignores Mode in that case)
 # Run:  python -m streamlit run cr_counter_app_viz_full.py
 from __future__ import annotations
 
@@ -115,7 +114,7 @@ FLAT_KEYS = {"F","Bb","Eb","Ab","Db","Gb","Cb"}
 def prefers_flats(k: str) -> bool: return k in FLAT_KEYS
 
 def normalize_key_mode(key: str, mode: str) -> Tuple[str, str]:
-    """Pass-through for canonical dropdown values: prevents surprise fallbacks."""
+    """Pass-through for canonical dropdowns: prevents surprise fallbacks."""
     k = key if key in MAJOR_PC else "C"
     m = mode if mode in ("major", "natural_minor", "harmonic_minor") else "major"
     return k, m
@@ -132,7 +131,7 @@ def midi_to_name(midi: int, flats=False):
     pc = midi % 12; name = names[pc]; return f"{name}{(midi//12)-1}"
 
 # -------- Raga definitions (semitone degrees from tonic) --------
-# Hindolam: S G2 M1 D1 N3 -> [0,3,5,8,11]
+# Correct Hindolam: S G2 M1 D1 N3 S -> [0,3,5,8,11]
 RAGA_DEGREES = {
     "Shankarabharanam (Major)":       [0,2,4,5,7,9,11],
     "Kalyani (Lydian #4)":            [0,2,4,6,7,9,11],
@@ -165,6 +164,8 @@ RAGA_DEGREES = {
     "Todi (Hanumatodi)":              [0,1,3,6,7,8,11],
 }
 
+RAGA_LIST = ["None (use Western mode)"] + list(RAGA_DEGREES.keys())
+
 def raga_scale_midis(key: str, raga: Optional[str], low=36, high=96) -> List[int]:
     tonic = MAJOR_PC[key]
     if not raga or raga == "None (use Western mode)":
@@ -189,6 +190,14 @@ def consonant_with(a:int, b:int) -> bool:
     d = abs((a-b)%12); return d in (0,3,4,5,7,8,9)
 
 def step_options(p:int, scale:List[int]): return [x for x in (p-2,p-1,p+1,p+2) if x in scale]
+
+def tonic_near_middle(key: str, scale: List[int], middle: int = 60) -> int:
+    """Find the tonic (by pitch class of key) *inside the given scale* closest to `middle` (C4 by default)."""
+    tonic_pc = MAJOR_PC[key]
+    candidates = [m for m in scale if (m % 12) == tonic_pc]
+    if not candidates:  # should never happen, but be safe
+        return min(scale, key=lambda m: abs(m - middle))
+    return min(candidates, key=lambda m: abs(m - middle))
 
 
 # -------------------- Styles & instruments --------------------
@@ -239,8 +248,9 @@ def choose_nearest_scale(target, scale): return min(scale, key=lambda m: abs(m-t
 
 def generate_lead_eighths(key, mode, raga, bars, register=(60,84)):
     scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
-    tonic_pc = MAJOR_PC[key]; start_target = 60 + tonic_pc
-    line = [choose_nearest_scale(start_target, scale)]
+    # START ON THE TONIC (closest to middle)
+    start_note = tonic_near_middle(key, scale, middle=60)
+    line = [start_note]
     weights = dict(BASE_W); prev_iv = 0
     total_eighths = bars*8
     for _ in range(1,total_eighths):
@@ -248,8 +258,8 @@ def generate_lead_eighths(key, mode, raga, bars, register=(60,84)):
         cand = line[-1] + iv
         nearest = choose_nearest_scale(cand, scale)
         line.append(nearest); prev_iv = iv
-    tonic_candidates = [m for m in scale if m%12==tonic_pc]
-    line[-1] = min(tonic_candidates, key=lambda m: abs(m - line[-1]))
+    # Smooth landing on tonic
+    line[-1] = tonic_near_middle(key, scale, middle=line[-1])
     return line
 
 
@@ -452,7 +462,7 @@ def parts_to_wav_preview(parts, tempo_bpm, bars=4, sr=22050):
 @dataclass
 class ScoreFingerprint:
     contour: List[int]         # sequence of melodic intervals in scale degrees-ish
-    rhythm_quavers: List[int]  # preserved for future; rhythm now comes from Style
+    rhythm_quavers: List[int]  # kept for future
     tonic_pc: int
     mode_guess: str
 
@@ -509,12 +519,12 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
 
 def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[str], bars: int, register=(60,84)):
     """
-    Build an eighth-note resolution melody driven by a contour (bars*8 slots).
-    Rhythm is chosen by Arrangement Style; we only return the pitches here.
+    Build an eighth-note resolution melody driven by a contour, but DO NOT set the rhythm here.
+    Rhythm is chosen by style (Pop/Latin/...).
     """
     scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
-    tonic_pc = MAJOR_PC[key]
-    start = choose_nearest_scale(60 + tonic_pc, scale)
+    # START ON THE TONIC (closest to middle)
+    start = tonic_near_middle(key, scale, middle=60)
     total_quavers = bars * 8
 
     out = [start]
@@ -530,8 +540,8 @@ def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[
         out.append(nxt)
         ci += 1
 
-    tonic_candidates = [m for m in scale if m % 12 == tonic_pc]
-    out[-1] = min(tonic_candidates, key=lambda m: abs(m - out[-1]))
+    # land near tonic
+    out[-1] = tonic_near_middle(key, scale, middle=out[-1])
     return out[:total_quavers]
 
 
@@ -554,28 +564,28 @@ with st.sidebar:
 
 col1, col2 = st.columns(2)
 
-# Key dropdown (prevents silent fallbacks)
+# Key dropdown
 key_input = col1.selectbox("Key", KEYS_CANON, index=KEYS_CANON.index("C"), key="ui_key")
 
-# Raga first, so we can disable Mode if a raga is active
+# Carnatic Raga (optional)
 raga_input = st.selectbox(
     "Carnatic Raga (optional)",
     ["None (use Western mode)"] + list(RAGA_DEGREES.keys()),
     index=0,
-    help="If a raga is selected it defines the pitch material; Mode is ignored."
+    help="Choose a raga to constrain pitch material. Rhythm still follows Arrangement Style."
 )
 
-# Mode is disabled when a Raga is active
-mode_disabled = (raga_input != "None (use Western mode)")
-mode_input = col2.selectbox(
-    "Mode (ignored when a Raga is selected)",
-    ["major","harmonic_minor","natural_minor"],
-    index=0,
-    key="ui_mode",
-    disabled=mode_disabled
-)
-if mode_disabled:
-    st.caption("**Mode is ignored** because a Carnatic Raga is active.")
+# Mode: hide/disable when a raga is active (engine ignores it in that case anyway)
+mode_slot = col2.empty()
+MODES = ["major", "harmonic_minor", "natural_minor"]
+if "ui_mode" not in st.session_state:
+    st.session_state.ui_mode = "major"
+
+if raga_input != "None (use Western mode)":
+    mode_slot.markdown("**Mode**: _controlled by raga_")
+    mode_input = st.session_state.ui_mode  # preserved but ignored
+else:
+    mode_input = mode_slot.selectbox("Mode", MODES, index=MODES.index(st.session_state.ui_mode), key="ui_mode")
 
 style = st.selectbox("Arrangement Style", list(STYLE_PATTERNS.keys()), index=2)
 species = st.selectbox("Counterpoint Species (counter part)", ["1","2","3","4","5","Classical"], index=2)
@@ -608,8 +618,12 @@ if upload is not None and _HAS_M21:
         st.error(f"Unable to parse uploaded score: {e}")
 
 if st.button("Generate Score"):
-    key, mode = normalize_key_mode(key_input, mode_input)
+    # If a raga is active, Western mode is irrelevant for pitch selection — but we still
+    # pass a neutral 'major' to MusicXML headers to avoid confusing changes.
+    effective_mode = mode_input if raga_input == "None (use Western mode)" else "major"
+    key, mode = normalize_key_mode(key_input, effective_mode)
     raga = raga_input
+
     if seed: random.seed(int(seed))
     patt = STYLE_PATTERNS[style]
     rhythms = {role: gen_rhythm(patt[role], bars_eff) for role in patt}
@@ -631,7 +645,7 @@ if st.button("Generate Score"):
     for inst in insts:
         role = inst["role"]
         if role == "lead":
-            rhythm = rhythms["lead"]  # always style rhythm
+            rhythm = rhythms["lead"]
             slots = lead_slots[:bars_eff*8]
         elif role == "counter":
             rhythm = rhythms["counter"]
