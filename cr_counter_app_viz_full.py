@@ -1,9 +1,20 @@
-# cr_counter_app_viz_full.py — CR-Counter with full-page background + styles + species + multi-instrument + Raga modes
-# Fixes in this version:
-#  - Lead always starts on the actual tonic of the chosen Key/Mode/Raga (closest to middle register), not C
-#  - Works for Western modes and all provided Ragas
-#  - Hides/disables Mode whenever a Carnatic Raga is selected (engine already ignores Mode in that case)
-# Run:  python -m streamlit run cr_counter_app_viz_full.py
+# cr_counter_app_viz_full.py — CR-Counter v2
+# Full-page background + styles + species + multi-instrument + Raga modes
+# NEW in v2:
+#   • Raga-fugal generator: all voices stay strictly inside raga, with degree-based imitation
+#   • Hide Species when a Raga is active; Western-mode Species unchanged
+#   • Light voice-leading "repair" (avoid parallel 5ths/8ves, accented dissonance) in Western mode
+#   • SoundFont preview (SF2/SF3) via fluidsynth CLI (preferred) or pyFluidSynth; sine synth fallback
+#   • Keeps all earlier UX: Key dropdown, raga picker, background image, MusicXML/MIDI export
+#
+# Run locally:
+#   python -m streamlit run cr_counter_app_viz_full.py
+#
+# Optional audio deps (strongly recommended for real-instrument previews):
+#   • fluidsynth CLI  -> install system package (e.g., brew install fluidsynth / apt-get install fluidsynth)
+#   • SoundFont file  -> e.g., MuseScore_General.sf3 or FluidR3_GM.sf2
+#   • pyFluidSynth    -> pip install pyFluidSynth   (used if CLI not found)
+#
 from __future__ import annotations
 
 import base64
@@ -12,14 +23,17 @@ import math
 import os
 import random
 import struct
+import subprocess
+import tempfile
+import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import streamlit as st
 from PIL import Image
 
-APP_NAME = "CR-Counter"
+APP_NAME = "CR-Counter v2"
 
 # -------------------- Optional deps --------------------
 try:
@@ -40,6 +54,12 @@ try:
 except Exception:
     _HAS_NP = False
 
+try:
+    import fluidsynth as pyfs  # pyFluidSynth
+    _HAS_PYFS = True
+except Exception:
+    _HAS_PYFS = False
+
 
 # -------------------- Visual helpers --------------------
 def _encode_img(img: Image.Image) -> str:
@@ -49,7 +69,6 @@ def _encode_img(img: Image.Image) -> str:
 
 
 def set_page_background(img: Image.Image):
-    """Use the image as a TRUE full-page background."""
     b64 = _encode_img(img)
     st.markdown(
         f"""
@@ -114,7 +133,6 @@ FLAT_KEYS = {"F","Bb","Eb","Ab","Db","Gb","Cb"}
 def prefers_flats(k: str) -> bool: return k in FLAT_KEYS
 
 def normalize_key_mode(key: str, mode: str) -> Tuple[str, str]:
-    """Pass-through for canonical dropdowns: prevents surprise fallbacks."""
     k = key if key in MAJOR_PC else "C"
     m = mode if mode in ("major", "natural_minor", "harmonic_minor") else "major"
     return k, m
@@ -131,8 +149,8 @@ def midi_to_name(midi: int, flats=False):
     pc = midi % 12; name = names[pc]; return f"{name}{(midi//12)-1}"
 
 # -------- Raga definitions (semitone degrees from tonic) --------
-# Correct Hindolam: S G2 M1 D1 N3 S -> [0,3,5,8,11]
-RAGA_DEGREES = {
+# Hindolam: S G2 M1 D1 N3 (no Pa) -> [0,3,5,8,11]
+RAGA_DEGREES: Dict[str, List[int]] = {
     "Shankarabharanam (Major)":       [0,2,4,5,7,9,11],
     "Kalyani (Lydian #4)":            [0,2,4,6,7,9,11],
     "Harikambhoji (Mixolydian)":      [0,2,4,5,7,9,10],
@@ -146,7 +164,7 @@ RAGA_DEGREES = {
     # Pentatonic
     "Mohanam (Major Pentatonic)":     [0,2,4,7,9],
     "Hamsadhwani":                    [0,2,4,7,11],
-    "Hindolam":                       [0,3,5,8,11],   # fixed
+    "Hindolam":                       [0,3,5,8,11],
     "Suddha Saveri":                  [0,2,5,7,9],
     "Abhogi":                         [0,2,3,5,7],
     "Sreeranjani":                    [0,2,3,6,9],
@@ -163,13 +181,12 @@ RAGA_DEGREES = {
     "Shubhapantuvarali":              [0,1,4,5,7,8,11],
     "Todi (Hanumatodi)":              [0,1,3,6,7,8,11],
 }
-
 RAGA_LIST = ["None (use Western mode)"] + list(RAGA_DEGREES.keys())
 
 def raga_scale_midis(key: str, raga: Optional[str], low=36, high=96) -> List[int]:
     tonic = MAJOR_PC[key]
     if not raga or raga == "None (use Western mode)":
-        return list(range(low, high+1))  # neutral; caller filters with Western mode
+        return list(range(low, high+1))
     degrees = set(RAGA_DEGREES.get(raga, DIATONIC_MAJOR))
     allowed_pc = set((tonic + d) % 12 for d in degrees)
     return [m for m in range(low, high+1) if (m % 12) in allowed_pc]
@@ -189,15 +206,15 @@ def scale_midis(key: str, mode: str, raga: Optional[str], low=36, high=96) -> Li
 def consonant_with(a:int, b:int) -> bool:
     d = abs((a-b)%12); return d in (0,3,4,5,7,8,9)
 
-def step_options(p:int, scale:List[int]): return [x for x in (p-2,p-1,p+1,p+2) if x in scale]
+def step_options(p:int, scale:List[int]) -> List[int]:
+    return [x for x in (p-2,p-1,p+1,p+2) if x in scale]
 
 def tonic_near_middle(key: str, scale: List[int], middle: int = 60) -> int:
-    """Find the tonic (by pitch class of key) *inside the given scale* closest to `middle` (C4 by default)."""
     tonic_pc = MAJOR_PC[key]
-    candidates = [m for m in scale if (m % 12) == tonic_pc]
-    if not candidates:  # should never happen, but be safe
+    cands = [m for m in scale if (m % 12) == tonic_pc]
+    if not cands:  # shouldn't happen
         return min(scale, key=lambda m: abs(m - middle))
-    return min(candidates, key=lambda m: abs(m - middle))
+    return min(cands, key=lambda m: abs(m - middle))
 
 
 # -------------------- Styles & instruments --------------------
@@ -248,7 +265,6 @@ def choose_nearest_scale(target, scale): return min(scale, key=lambda m: abs(m-t
 
 def generate_lead_eighths(key, mode, raga, bars, register=(60,84)):
     scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
-    # START ON THE TONIC (closest to middle)
     start_note = tonic_near_middle(key, scale, middle=60)
     line = [start_note]
     weights = dict(BASE_W); prev_iv = 0
@@ -258,12 +274,11 @@ def generate_lead_eighths(key, mode, raga, bars, register=(60,84)):
         cand = line[-1] + iv
         nearest = choose_nearest_scale(cand, scale)
         line.append(nearest); prev_iv = iv
-    # Smooth landing on tonic
     line[-1] = tonic_near_middle(key, scale, middle=line[-1])
     return line
 
 
-# -------------------- Counterpoint (species) --------------------
+# -------------------- Western counterpoint (Species) --------------------
 SPECIES_RHYTHM = {"1":[8], "2":[4,4], "3":[2,2,2,2], "4":[6,2], "5":[1,1,2,1,1,2], "Classical":[1,1,2,1,1,2]}
 
 def generate_counter_species(cantus_slots, key, mode, raga, bars, species, register=(55,84)):
@@ -296,6 +311,150 @@ def generate_counter_species(cantus_slots, key, mode, raga, bars, species, regis
             n4 = min(step_options(n3, scale) or [n3], key=lambda n: abs(n-n3))
             out += [b1, n1, n2, n2, b3, n3, n4, n4]; i += 8
     return out[:total]
+
+# --- Light "repair pass" (Western mode only) ---
+def _avoid_parallels_and_accented(lead: List[int], other: List[int], scale: List[int]) -> List[int]:
+    # Simple, local nudges to avoid exact parallels and accented dissonance on beats
+    out = other[:]
+    total = min(len(lead), len(other))
+    for i in range(total):
+        beat_pos = i % 8  # 4/4 eighth grid
+        interval = abs((lead[i] - out[i]) % 12)
+        # Avoid perfect unisons/8ves/5ths moving in same direction (very rough)
+        if interval in (0,7) and i > 0:
+            if (lead[i]-lead[i-1])*(out[i]-out[i-1]) > 0:
+                # Nudge other by nearest step in opposite direction
+                opts = step_options(out[i], scale)
+                if opts:
+                    out[i] = min(opts, key=lambda x: abs((abs((lead[i]-x)%12) - 3)))  # bias to 3rd/6th
+        # Accented dissonance on strong 8th (0,2,4,6) -> try consonant
+        if beat_pos in (0,2,4,6):
+            if interval not in (0,3,4,5,7,8,9):
+                opts = step_options(out[i], scale)
+                if opts:
+                    out[i] = min(opts, key=lambda x: 0 if abs((lead[i]-x)%12) in (0,3,4,5,7,8,9) else 1)
+    return out
+
+
+# -------------------- Raga-fugal helpers --------------------
+def _raga_pcs(key: str, raga: str) -> List[int]:
+    tonic = MAJOR_PC[key]
+    degs = RAGA_DEGREES[raga]
+    return [ (tonic + d) % 12 for d in degs ]
+
+def _raga_degree_index(pc: int, pcs: List[int]) -> int:
+    # nearest-degree index for a given pitch class
+    return min(range(len(pcs)), key=lambda i: min((pc - pcs[i]) % 12, (pcs[i] - pc) % 12))
+
+def _transpose_degree_in_raga(midi: int, key: str, raga: str, degree_steps: int) -> int:
+    pcs = _raga_pcs(key, raga)
+    idx = _raga_degree_index(midi % 12, pcs)
+    tgt_idx = (idx + degree_steps) % len(pcs)
+    tgt_pc = pcs[tgt_idx]
+    # choose nearest octave placement
+    candidates = [midi-12, midi, midi+12, midi+24, midi-24]
+    best = min(candidates, key=lambda m: (abs((m % 12) - tgt_pc) if (m % 12)!=tgt_pc else 0, abs(m - midi)))
+    # force exact pc
+    if best % 12 != tgt_pc:
+        # adjust by small shift to hit exact pc
+        for delta in range(-6, 7):
+            cand = best + delta
+            if cand % 12 == tgt_pc:
+                best = cand; break
+    return best
+
+def _raga_answer_steps(key: str, raga: str) -> int:
+    # Prefer Pa (7) if present, else Ma (5), else stay on Sa
+    pcs = set(_raga_pcs(key, raga))
+    tonic = MAJOR_PC[key]
+    pa = (tonic + 7) % 12
+    ma = (tonic + 5) % 12
+    degs = _raga_pcs(key, raga)
+    if pa in pcs:
+        return degs.index(pa)
+    if ma in pcs:
+        return degs.index(ma)
+    return 0
+
+def _clip_to_range(m: int, rng: Tuple[int,int], scale: List[int]) -> int:
+    if m < rng[0]: m += 12 * ((rng[0]-m + 11)//12)
+    if m > rng[1]: m -= 12 * ((m-rng[1] + 11)//12)
+    # snap to nearest allowed note within range
+    return min((x for x in scale if rng[0]<=x<=rng[1]), key=lambda x: abs(x-m))
+
+def _raga_contrary_step(prev: int, target: int, scale: List[int]) -> int:
+    # move one step opposite to the lead's direction (if possible)
+    dir = -1 if target > prev else 1
+    cands = [prev + dir, prev + 2*dir]
+    cands = [c for c in cands if c in scale]
+    return cands[0] if cands else prev
+
+def build_raga_fugal_parts(lead_slots: List[int], key: str, raga: str,
+                           bars: int, insts: List[dict]) -> Dict[str, dict]:
+    """
+    Create imitative entries for all non-lead parts, strictly inside raga by DEGREE mapping.
+    Keeps style rhythms (assigned outside).
+    """
+    total = bars*8
+    parts_map: Dict[str, dict] = {}
+    # Precompute scales per instrument range
+    scale_cache = {}
+    for inst in insts:
+        rng = inst["range"]
+        scale_cache[inst["name"]] = scale_midis(key, "major", raga, low=rng[0], high=rng[1])
+
+    # Subject = lead_slots as-is
+    for inst in insts:
+        if inst["role"] == "lead":
+            parts_map[inst["name"]] = {"slots": lead_slots[:total]}
+            break
+
+    # Determine degree steps for "answer"
+    deg_steps = _raga_answer_steps(key, raga)
+
+    # Entry offsets in 8ths (light fugue-like entries)
+    # counter enters after 1 bar, bass after 2 beats, pad after 2 bars
+    role_offsets = {"counter": 8, "bass": 4, "pad": 16}
+
+    for inst in insts:
+        if inst["role"] == "lead": 
+            continue
+        rng = inst["range"]
+        rscale = scale_cache[inst["name"]]
+        off = role_offsets.get(inst["role"], 8)
+
+        # Start from degree-transposed subject
+        raw = []
+        for i in range(total):
+            src_idx = max(0, i - off)
+            src_note = lead_slots[src_idx] if i >= off else lead_slots[0]
+            # Map by DEGREE within raga, not raw semitone:
+            im_note = _transpose_degree_in_raga(src_note, key, raga, deg_steps)
+            # Add a bit of contrary/oblique flavor
+            if i>0 and i%4==0:
+                im_note = _raga_contrary_step(raw[-1] if raw else im_note, im_note, rscale)
+            # Keep within instrument range and raga scale:
+            im_note = _clip_to_range(im_note, rng, rscale)
+            raw.append(im_note)
+
+        parts_map[inst["name"]] = {"slots": raw[:total]}
+
+    # Avoid obvious vertical collisions (quick pass)
+    lead = parts_map[[i["name"] for i in insts if i["role"]=="lead"][0]]["slots"]
+    for name, pdata in parts_map.items():
+        if name == [i["name"] for i in insts if i["role"]=="lead"][0]:
+            continue
+        out = pdata["slots"][:]
+        for i in range(total):
+            if abs((lead[i]-out[i])%12) == 0:
+                # avoid exact unison -> move to nearest neighbor in raga scale
+                rng = next(i2 for i2 in insts if i2["name"]==name)["range"]
+                rscale = scale_cache[name]
+                opts = [x for x in [out[i]-1,out[i]+1,out[i]-2,out[i]+2] if x in rscale and rng[0]<=x<=rng[1]]
+                if opts:
+                    out[i] = min(opts, key=lambda x: abs((lead[i]-x)%12) in (0,7))
+        pdata["slots"] = out
+    return parts_map
 
 
 # -------------------- MusicXML --------------------
@@ -344,7 +503,21 @@ def _emit_note(meas, midi, dur8, divisions, flats):
 
 
 # -------------------- MIDI export --------------------
-PROGRAMS = {"lead":73, "counter":71, "bass":32, "pad":88}  # rough GM programs
+PROGRAMS_GM = {  # GM programs by role (defaults)
+    "lead":   73,   # Flute
+    "counter":71,   # Clarinet
+    "bass":   32,   # Acoustic Bass
+    "pad":    88,   # Warm Pad
+}
+# override per instrument if you wish (optional)
+PROGRAMS_PER_INST = {
+    "Violin": 40, "Viola": 41, "Cello": 42, "Double Bass": 43,
+    "Flute": 73, "Oboe": 68, "Clarinet": 71, "Reed Section": 65,
+    "Piano Pad": 0, "Strings Pad": 48
+}
+
+def _program_for_part(p):
+    return PROGRAMS_PER_INST.get(p["name"], PROGRAMS_GM.get(p["role"], 73))
 
 def parts_to_midi_bytes(parts, tempo_bpm):
     if not _HAS_MIDO:
@@ -356,21 +529,22 @@ def parts_to_midi_bytes(parts, tempo_bpm):
     us_per_beat = int(60_000_000 / max(1, int(tempo_bpm)))
     track.append(mido.MetaMessage('set_tempo', tempo=us_per_beat, time=0))
 
-    events = []  # (abs_tick, kind, a, b, role)
+    events = []  # (abs_tick, kind, a, b, channel)
+    channel = 0
     for p in parts:
-        role = p["role"]
-        program = PROGRAMS.get(role, 73)
-        events.append((0, "program_change", program, None, role))
+        program = _program_for_part(p)
+        events.append((0, "program_change", program, None, channel))
         abs_tick = 0
         idx = 0
         for dur8 in p["rhythm"]:
             pitch = p["slots"][idx]
             dur_q = dur8 / 2.0
             dur_ticks = int(dur_q * 480)
-            events.append((abs_tick, "on", pitch, 72, role))
-            events.append((abs_tick + dur_ticks, "off", pitch, 64, role))
+            events.append((abs_tick, "on", pitch, 92, channel))
+            events.append((abs_tick + dur_ticks, "off", pitch, 64, channel))
             abs_tick += dur_ticks
             idx += dur8
+        channel = (channel + 1) % 16
 
     def _sort_key(e):
         t, kind, *_ = e
@@ -379,35 +553,34 @@ def parts_to_midi_bytes(parts, tempo_bpm):
     events.sort(key=_sort_key)
 
     current = 0
-    current_program = None
-    for t, kind, a, b, _role in events:
-        delta = t - current
-        current = t
+    prog_by_chan = {}
+    for t, kind, a, b, ch in events:
+        delta = t - current; current = t
         if kind == "program_change":
-            if a != current_program:
-                track.append(mido.Message('program_change', program=int(a), time=delta))
-                current_program = a
+            prev = prog_by_chan.get(ch, None)
+            if a != prev:
+                track.append(mido.Message('program_change', channel=ch, program=int(a), time=delta))
+                prog_by_chan[ch] = a
             else:
-                track.append(mido.Message('program_change', program=int(a), time=delta))
+                track.append(mido.Message('program_change', channel=ch, program=int(a), time=delta))
         elif kind == "on":
-            track.append(mido.Message('note_on', note=int(a), velocity=int(b), time=delta))
+            track.append(mido.Message('note_on', channel=ch, note=int(a), velocity=int(b), time=delta))
         elif kind == "off":
-            track.append(mido.Message('note_off', note=int(a), velocity=int(b), time=delta))
+            track.append(mido.Message('note_off', channel=ch, note=int(a), velocity=int(b), time=delta))
 
     bio = io.BytesIO()
     mid.save(file=bio)
     return bio.getvalue()
 
 
-# -------------------- Audio preview (first N bars) --------------------
-_INSTR_GAIN = {"lead":0.9,"counter":0.7,"bass":0.7,"pad":0.5}
+# -------------------- Audio preview --------------------
+_INSTR_GAIN = {"lead":0.9,"counter":0.75,"bass":0.75,"pad":0.55}
 def _midi_to_hz(n): return 440.0 * (2.0 ** ((n - 69) / 12.0))
 
-def parts_to_wav_preview(parts, tempo_bpm, bars=4, sr=22050):
+def parts_to_wav_preview_sine(parts, tempo_bpm, bars=4, sr=22050):
     seconds_per_beat = 60.0 / max(1, tempo_bpm)
     beats_total = 4 * bars
     seconds_total = beats_total * seconds_per_beat
-
     n_samples = int(seconds_total * sr)
     if _HAS_NP:
         mix = _np.zeros(n_samples, dtype=_np.float32)
@@ -457,11 +630,107 @@ def parts_to_wav_preview(parts, tempo_bpm, bars=4, sr=22050):
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes(pcm16)
     return buf.getvalue()
 
+def _which(cmd: str) -> Optional[str]:
+    return shutil.which(cmd)
+
+def render_preview_with_sf2(parts, tempo_bpm, sf_path: str, sr=44100) -> Optional[bytes]:
+    """
+    Preferred path: fluidsynth CLI (stable, high quality).
+    Fallback path: pyFluidSynth (best effort).
+    Returns wav bytes or None if all methods fail.
+    """
+    if not os.path.isfile(sf_path):
+        return None
+
+    # 1) fluidsynth CLI
+    cli = _which("fluidsynth")
+    if cli and _HAS_MIDO:
+        try:
+            midi_bytes = parts_to_midi_bytes(parts, int(tempo_bpm))
+            with tempfile.TemporaryDirectory() as td:
+                midf = os.path.join(td, "prev.mid")
+                wavf = os.path.join(td, "prev.wav")
+                with open(midf, "wb") as f:
+                    f.write(midi_bytes)
+                cmd = [cli, "-ni", sf_path, midf, "-F", wavf, "-r", str(sr)]
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                with open(wavf, "rb") as f:
+                    return f.read()
+        except Exception:
+            pass
+
+    # 2) pyFluidSynth (approximate offline)
+    if _HAS_PYFS and _HAS_MIDO:
+        try:
+            midi_bytes = parts_to_midi_bytes(parts, int(tempo_bpm))
+            mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
+            fs = pyfs.Synth(samplerate=sr)
+            fs.sfload(sf_path, True)
+            fs.program_reset()
+            # naive channel->program collected from MIDI
+            chan_prog = {}
+            for tr in mid.tracks:
+                time = 0.0
+                for msg in tr:
+                    time += msg.time
+                    if msg.type == "program_change":
+                        chan_prog[msg.channel] = msg.program
+            # start rendering
+            block = 64
+            audio = []
+            time_sec = 0.0
+            mid.ticks_per_beat = mid.ticks_per_beat or 480
+            tempo = 60/120.0  # default, will be set by set_tempo
+            for tr in mid.tracks:
+                t_sec = 0.0
+                for msg in tr:
+                    t_sec += mido.tick2second(msg.time, mid.ticks_per_beat,
+                                              500000 if msg.type!="set_tempo" else msg.tempo)
+                    # consume silence
+                    while time_sec < t_sec:
+                        audio.extend(fs.get_samples(block))
+                        time_sec += block / sr
+                    # apply event
+                    if msg.type == "set_tempo":
+                        pass  # we already accounted in tick2second
+                    elif msg.type == "program_change":
+                        fs.program_select(msg.channel, 0, 0, msg.program)
+                    elif msg.type == "note_on":
+                        fs.noteon(msg.channel, msg.note, msg.velocity)
+                    elif msg.type == "note_off":
+                        fs.noteoff(msg.channel, msg.note)
+            # Drain tail
+            for _ in range(int(sr*0.5 // block)):
+                audio.extend(fs.get_samples(block))
+            fs.delete()
+            # pack to wav
+            if not audio:
+                return None
+            import array, wave
+            # fluidsynth returns float32 pairs (stereo)
+            arr = array.array('f', audio)
+            # normalize and convert to int16
+            if _HAS_NP:
+                a = _np.frombuffer(arr.tobytes(), dtype=_np.float32)
+                a = a / max(1e-6, _np.max(_np.abs(a))) * 0.95
+                pcm16 = (a * 32767.0).astype(_np.int16).tobytes()
+            else:
+                mx = max(1e-6, max(abs(x) for x in arr))
+                pcm16 = b''.join(struct.pack("<h", int(max(-32768, min(32767, x/mx*32767*0.95)))) for x in arr)
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr); w.writeframes(pcm16)
+            return buf.getvalue()
+        except Exception:
+            return None
+
+    return None
+
 
 # -------------------- Score upload (fingerprint) --------------------
 @dataclass
 class ScoreFingerprint:
-    contour: List[int]         # sequence of melodic intervals in scale degrees-ish
+    contour: List[int]
     rhythm_quavers: List[int]  # kept for future
     tonic_pc: int
     mode_guess: str
@@ -518,12 +787,7 @@ def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprin
 
 
 def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[str], bars: int, register=(60,84)):
-    """
-    Build an eighth-note resolution melody driven by a contour, but DO NOT set the rhythm here.
-    Rhythm is chosen by style (Pop/Latin/...).
-    """
     scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
-    # START ON THE TONIC (closest to middle)
     start = tonic_near_middle(key, scale, middle=60)
     total_quavers = bars * 8
 
@@ -540,7 +804,6 @@ def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[
         out.append(nxt)
         ci += 1
 
-    # land near tonic
     out[-1] = tonic_near_middle(key, scale, middle=out[-1])
     return out[:total_quavers]
 
@@ -575,20 +838,26 @@ raga_input = st.selectbox(
     help="Choose a raga to constrain pitch material. Rhythm still follows Arrangement Style."
 )
 
-# Mode: hide/disable when a raga is active (engine ignores it in that case anyway)
+# Mode: hide/disable when a raga is active
 mode_slot = col2.empty()
 MODES = ["major", "harmonic_minor", "natural_minor"]
 if "ui_mode" not in st.session_state:
     st.session_state.ui_mode = "major"
-
 if raga_input != "None (use Western mode)":
     mode_slot.markdown("**Mode**: _controlled by raga_")
-    mode_input = st.session_state.ui_mode  # preserved but ignored
+    mode_input = st.session_state.ui_mode  # preserved but ignored in engine
 else:
     mode_input = mode_slot.selectbox("Mode", MODES, index=MODES.index(st.session_state.ui_mode), key="ui_mode")
 
 style = st.selectbox("Arrangement Style", list(STYLE_PATTERNS.keys()), index=2)
-species = st.selectbox("Counterpoint Species (counter part)", ["1","2","3","4","5","Classical"], index=2)
+
+# Species (Western only): hidden in Raga mode
+species_slot = st.empty()
+if raga_input != "None (use Western mode)":
+    species_slot.markdown("**Counterpoint Species**: _raga-fugal (auto)_")
+    species = "Classical"  # ignored in engine when raga active
+else:
+    species = species_slot.selectbox("Counterpoint Species (counter part)", ["1","2","3","4","5","Classical"], index=2)
 
 bars = st.slider("Bars (4/4 time)", 4, 128, 32, 1)
 target_tokens = st.number_input("Optional: target length in eighth-notes (overrides Bars)", min_value=0, value=0, step=8)
@@ -608,6 +877,20 @@ upload = st.file_uploader(
     type=["xml","musicxml","mxl","mid","midi"]
 )
 
+# --- SoundFont settings (for real-instrument preview) ---
+st.markdown("#### SoundFont (optional, for realistic audio preview)")
+sf_col1, sf_col2 = st.columns([3,1])
+sf_path = sf_col1.text_input("SF2 / SF3 file path (e.g., MuseScore_General.sf3, FluidR3_GM.sf2)", value=st.session_state.get("sf_path",""))
+use_sf = sf_col2.checkbox("Use SoundFont", value=bool(st.session_state.get("sf_use", False)))
+if sf_path and os.path.isfile(sf_path):
+    st.session_state.sf_path = sf_path
+if use_sf:
+    st.session_state.sf_use = True
+    if not sf_path or not os.path.isfile(sf_path):
+        st.warning("Enable is on, but no valid SF2/SF3 path found. Falling back to synthetic preview.")
+else:
+    st.session_state.sf_use = False
+
 fp: Optional[ScoreFingerprint] = None
 if upload is not None and _HAS_M21:
     try:
@@ -618,8 +901,6 @@ if upload is not None and _HAS_M21:
         st.error(f"Unable to parse uploaded score: {e}")
 
 if st.button("Generate Score"):
-    # If a raga is active, Western mode is irrelevant for pitch selection — but we still
-    # pass a neutral 'major' to MusicXML headers to avoid confusing changes.
     effective_mode = mode_input if raga_input == "None (use Western mode)" else "major"
     key, mode = normalize_key_mode(key_input, effective_mode)
     raga = raga_input
@@ -642,29 +923,41 @@ if st.button("Generate Score"):
         lead_slots = generate_lead_eighths(key, mode, raga, bars_eff, register=lead_inst["range"])
 
     parts = []
-    for inst in insts:
-        role = inst["role"]
-        if role == "lead":
-            rhythm = rhythms["lead"]
-            slots = lead_slots[:bars_eff*8]
-        elif role == "counter":
-            rhythm = rhythms["counter"]
-            slots = generate_counter_species(lead_slots, key, mode, raga, bars_eff, species, register=inst["range"])
-        elif role == "bass":
-            rhythm = rhythms["bass"]
-            base_scale = scale_midis(key, mode, raga, low=inst["range"][0], high=inst["range"][1])
-            slots = []
-            for i,p in enumerate(lead_slots[:bars_eff*8]):
-                target = p-12 if (i%8) in (0,4) else p-7
-                slots.append(min(base_scale, key=lambda m: abs(m-target)))
-        else:  # pad
-            rhythm = rhythms["pad"]
-            base_scale = scale_midis(key, mode, raga, low=inst["range"][0], high=inst["range"][1])
-            slots = []
-            for i,p in enumerate(lead_slots[:bars_eff*8]):
-                target = p if (i%8) in (0,4) else (slots[-1] if slots else p)
-                slots.append(min(base_scale, key=lambda m: abs(m-target)))
-        parts.append({"name": inst["name"], "role": role, "rhythm": rhythm, "slots": slots})
+    if raga != "None (use Western mode)":
+        # --- RAGA FUGAL ENGINE ---
+        raga_parts = build_raga_fugal_parts(lead_slots, key, raga, bars_eff, insts)
+        for inst in insts:
+            role = inst["role"]
+            rhythm = rhythms[role]
+            slots_all = raga_parts[inst["name"]]["slots"]
+            # Align slots to rhythm tokenization (eighths per value):
+            # our rhythm values are already summed in 8ths; slots are 8th-resolution -> OK
+            parts.append({"name": inst["name"], "role": role, "rhythm": rhythm, "slots": slots_all})
+    else:
+        # --- WESTERN ENGINE (original behavior + light repair for counter voices) ---
+        for inst in insts:
+            role = inst["role"]
+            rhythm = rhythms[role]
+            if role == "lead":
+                slots = lead_slots[:bars_eff*8]
+            elif role == "counter":
+                slots = generate_counter_species(lead_slots, key, mode, raga, bars_eff, species, register=inst["range"])
+                # repair pass (avoid some parallels/accented dissonance)
+                scl = scale_midis(key, mode, None, low=inst["range"][0], high=inst["range"][1])
+                slots = _avoid_parallels_and_accented(lead_slots[:bars_eff*8], slots, scl)
+            elif role == "bass":
+                base_scale = scale_midis(key, mode, None, low=inst["range"][0], high=inst["range"][1])
+                slots = []
+                for i,pn in enumerate(lead_slots[:bars_eff*8]):
+                    target = pn-12 if (i%8) in (0,4) else pn-7
+                    slots.append(min(base_scale, key=lambda m: abs(m-target)))
+            else:  # pad
+                base_scale = scale_midis(key, mode, None, low=inst["range"][0], high=inst["range"][1])
+                slots = []
+                for i,pn in enumerate(lead_slots[:bars_eff*8]):
+                    target = pn if (i%8) in (0,4) else (slots[-1] if slots else pn)
+                    slots.append(min(base_scale, key=lambda m: abs(m-target)))
+            parts.append({"name": inst["name"], "role": role, "rhythm": rhythm, "slots": slots})
 
     # ---- Downloads & preview ----
     xml_bytes = parts_to_musicxml(parts, key, mode, raga, int(tempo), bars_eff)
@@ -689,12 +982,20 @@ if st.button("Generate Score"):
         except Exception as e:
             st.warning(f"MIDI export failed: {e} (install/update `mido`)")
 
-    with st.expander("Audio previews (first 4 bars, simple synth)"):
-        try:
-            wav_bytes = parts_to_wav_preview(parts, int(tempo), bars=4, sr=22050)
+    with st.expander("Audio preview (first 4 bars)"):
+        wav_bytes = None
+        if use_sf and sf_path and os.path.isfile(sf_path):
+            wav_bytes = render_preview_with_sf2(parts, int(tempo), sf_path, sr=44100)
+        if wav_bytes is None:
+            # fallback: synth sine
+            try:
+                wav_bytes = parts_to_wav_preview_sine(parts, int(tempo), bars=4, sr=22050)
+            except Exception as e:
+                st.warning(f"Audio preview failed: {e}")
+        if wav_bytes:
             st.audio(wav_bytes, format="audio/wav")
-        except Exception as e:
-            st.warning(f"Audio preview failed: {e}")
+        else:
+            st.warning("Could not render audio preview. Check SoundFont path or install fluidsynth/pyFluidSynth.")
 
     flats = prefers_flats(key)
     st.markdown("**Preview (first 16 eighths per part)**")
