@@ -1,0 +1,984 @@
+# cr_counter_app_viz_full.py — CR-Counter v2 (robust SoundFont preview + diagnostics)
+# - Raga-fugal (degree-based) + Western species (simplified) + style rhythms
+# - MusicXML + MIDI export
+# - SoundFont preview (pyFluidSynth -> Fluidsynth CLI -> sine fallback) with UI diagnostics
+#
+# Run:
+#   py -m streamlit run cr_counter_app_viz_full.py
+#
+# Optional deps (recommended for realistic audio):
+#   pip install mido pyFluidSynth music21 numpy pillow
+#   (and install fluidsynth CLI if you want the CLI fallback)
+#
+from __future__ import annotations
+
+import base64
+import io
+import math
+import os
+import random
+import struct
+import shutil
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
+
+import streamlit as st
+from PIL import Image
+
+APP_NAME = "CR-Counter v2"
+
+# -------------------- Optional deps flags --------------------
+try:
+    import music21 as m21
+    _HAS_M21 = True
+except Exception:
+    _HAS_M21 = False
+
+try:
+    import mido
+    _HAS_MIDO = True
+except Exception:
+    _HAS_MIDO = False
+
+try:
+    import numpy as _np
+    _HAS_NP = True
+except Exception:
+    _HAS_NP = False
+
+try:
+    import fluidsynth as pyfs  # pyFluidSynth
+    _HAS_PYFS = True
+except Exception:
+    _HAS_PYFS = False
+
+
+# -------------------- Visual helpers --------------------
+def _encode_img(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def set_page_background(img: Image.Image):
+    b64 = _encode_img(img)
+    st.markdown(
+        f"""
+        <style>
+        html, body, [data-testid="stAppViewContainer"] {{
+            background: url("data:image/png;base64,{b64}") center center fixed no-repeat !important;
+            background-size: cover !important;
+        }}
+        [data-testid="stHeader"] {{
+            background: transparent !important;
+        }}
+        .main .block-container {{
+            background: rgba(255,255,255,0.86) !important;
+            border-radius: 16px;
+            padding: 12px 18px;
+            box-shadow: 0 6px 24px rgba(0,0,0,0.06);
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def load_header_image() -> Image.Image | None:
+    for c in [
+        "header.jpg",
+        "header.png",
+        "cover.jpg",
+        "cover.png",
+        "VS_Pop_Funky_1400x1400.jpg",
+    ]:
+        try:
+            return Image.open(c).convert("RGB")
+        except Exception:
+            continue
+    return None
+
+
+def hero(title: str):
+    st.markdown(
+        f"<h1 style='text-align:center;margin:0.35rem 0 1.0rem 0'>{title}</h1>",
+        unsafe_allow_html=True,
+    )
+
+
+# -------------------- Theory helpers --------------------
+KEYS_CANON = [
+    "C","G","D","A","E","B","F#","C#",
+    "F","Bb","Eb","Ab","Db","Gb","Cb"
+]
+
+MAJOR_PC = {"C":0,"G":7,"D":2,"A":9,"E":4,"B":11,"F#":6,"C#":1,"F":5,"Bb":10,"Eb":3,"Ab":8,"Db":1,"Gb":6,"Cb":11}
+FIFTHS   = {"C":0,"G":1,"D":2,"A":3,"E":4,"B":5,"F#":6,"C#":7,"F":-1,"Bb":-2,"Eb":-3,"Ab":-4,"Db":-5,"Gb":-6,"Cb":-7}
+STEP_SHARP = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+STEP_FLAT  = ["C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B"]
+DIATONIC_MAJOR = [0,2,4,5,7,9,11]
+DIATONIC_NAT_MINOR = [0,2,3,5,7,8,10]
+DIATONIC_HARM_MINOR = [0,2,3,5,7,8,11]
+FLAT_KEYS = {"F","Bb","Eb","Ab","Db","Gb","Cb"}
+
+def prefers_flats(k: str) -> bool: return k in FLAT_KEYS
+
+def normalize_key_mode(key: str, mode: str) -> Tuple[str, str]:
+    k = key if key in MAJOR_PC else "C"
+    m = mode if mode in ("major", "natural_minor", "harmonic_minor") else "major"
+    return k, m
+
+def midi_to_pitch(midi: int, flats=False):
+    names = STEP_FLAT if flats else STEP_SHARP
+    pc = midi % 12; name = names[pc]; step = name[0]; alter = 0
+    if len(name)==2: alter = 1 if name[1] == "#" else -1
+    octave = (midi//12) - 1
+    return step, alter, octave
+
+def midi_to_name(midi: int, flats=False):
+    names = STEP_FLAT if flats else STEP_SHARP
+    pc = midi % 12; name = names[pc]; return f"{name}{(midi//12)-1}"
+
+
+# -------- Raga degrees (semitone offsets from tonic) --------
+RAGA_DEGREES: Dict[str, List[int]] = {
+    "Shankarabharanam (Major)":       [0,2,4,5,7,9,11],
+    "Kalyani (Lydian #4)":            [0,2,4,6,7,9,11],
+    "Harikambhoji (Mixolydian)":      [0,2,4,5,7,9,10],
+    "Kharaharapriya (Dorian)":        [0,2,3,5,7,9,10],
+    "Natabhairavi (Natural Minor)":   [0,2,3,5,7,8,10],
+    "Keeravani (Harmonic Minor)":     [0,2,3,5,7,8,11],
+    "Charukesi":                      [0,2,4,5,7,8,11],
+    "Sarasangi":                      [0,1,4,5,7,9,11],
+    "Mararanjani":                    [0,2,4,6,7,8,10],
+
+    # Pentatonic
+    "Mohanam (Major Pentatonic)":     [0,2,4,7,9],
+    "Hamsadhwani":                    [0,2,4,7,11],
+    "Hindolam":                       [0,3,5,8,11],
+    "Suddha Saveri":                  [0,2,5,7,9],
+    "Abhogi":                         [0,2,3,5,7],
+    "Sreeranjani":                    [0,2,3,6,9],
+    "Madhyamavati":                   [0,2,5,7,10],
+    "Megh (Megh Malhar)":             [0,2,5,7,9],
+
+    # Hexatonic / others
+    "Durga":                          [0,2,5,7,9,10],
+    "Devakriya (Sudha Dhanyasi)":     [0,2,3,7,9],
+    "Revati":                         [0,1,5,7,11],
+    "Amritavarshini":                 [0,4,6,7,11],
+    "Vachaspati (Lydian b7)":         [0,2,4,6,7,9,10],
+    "Hemavati":                       [0,2,3,6,7,9,11],
+    "Shubhapantuvarali":              [0,1,4,5,7,8,11],
+    "Todi (Hanumatodi)":              [0,1,3,6,7,8,11],
+}
+RAGA_LIST = ["None (use Western mode)"] + list(RAGA_DEGREES.keys())
+
+def raga_scale_midis(key: str, raga: Optional[str], low=36, high=96) -> List[int]:
+    tonic = MAJOR_PC[key]
+    if not raga or raga == "None (use Western mode)":
+        return list(range(low, high+1))
+    degrees = set(RAGA_DEGREES.get(raga, DIATONIC_MAJOR))
+    allowed_pc = set((tonic + d) % 12 for d in degrees)
+    return [m for m in range(low, high+1) if (m % 12) in allowed_pc]
+
+def western_scale_midis(key: str, mode: str, low=36, high=96) -> List[int]:
+    tonic = MAJOR_PC[key]
+    if mode=="major": allowed = set((tonic + d) % 12 for d in DIATONIC_MAJOR)
+    elif mode=="natural_minor": allowed = set((tonic + d) % 12 for d in DIATONIC_NAT_MINOR)
+    else: allowed = set((tonic + d) % 12 for d in DIATONIC_HARM_MINOR)
+    return [m for m in range(low, high+1) if (m % 12) in allowed]
+
+def scale_midis(key: str, mode: str, raga: Optional[str], low=36, high=96) -> List[int]:
+    if raga and raga != "None (use Western mode)":
+        return raga_scale_midis(key, raga, low, high)
+    return western_scale_midis(key, mode, low, high)
+
+def consonant_with(a:int, b:int) -> bool:
+    d = abs((a-b)%12); return d in (0,3,4,5,7,8,9)
+
+def step_options(p:int, scale:List[int]) -> List[int]:
+    return [x for x in (p-2,p-1,p+1,p+2) if x in scale]
+
+def tonic_near_middle(key: str, scale: List[int], middle: int = 60) -> int:
+    tonic_pc = MAJOR_PC[key]
+    cands = [m for m in scale if (m % 12) == tonic_pc]
+    if not cands:
+        return min(scale, key=lambda m: abs(m - middle))
+    return min(cands, key=lambda m: abs(m - middle))
+
+
+# -------------------- Styles & instruments --------------------
+STYLE_PATTERNS = {
+    "Pop":      {"lead":[[2,2,2,2]], "counter":[[1,1,2,1,1,2]], "bass":[[2,2,2,2]], "pad":[[8]]},
+    "Rock":     {"lead":[[2,2,1,1,2]], "counter":[[1,1,1,1,2,2]], "bass":[[2,2,2,2]], "pad":[[4,4]]},
+    "R&B":      {"lead":[[1,1,2,1,1,2]], "counter":[[1,1,1,1,1,1,2]], "bass":[[2,1,1,2,2]], "pad":[[8]]},
+    "Dance":    {"lead":[[1,1,1,1,2,2]], "counter":[[1,1,1,1,1,1,2]], "bass":[[1,1,1,1,1,1,1,1]], "pad":[[4,4]]},
+    "Country":  {"lead":[[2,2,2,2]], "counter":[[1,1,2,1,1,2]], "bass":[[2,2,2,2]], "pad":[[8]]},
+    "Folk":     {"lead":[[2,2,2,2]], "counter":[[2,1,1,2]], "bass":[[2,2,2,2]], "pad":[[4,4]]},
+    "World":    {"lead":[[1,1,2,1,1,2]], "counter":[[2,1,1,2]], "bass":[[2,2,1,1]], "pad":[[8]]},
+    "Classical":{"lead":[[2,2,2,2]], "counter":[[1,1,2,1,1,2]], "bass":[[2,2,2,2]], "pad":[[8]]},
+    "Jazz":     {"lead":[[1,1,1,1,2,2]], "counter":[[1,1,1,1,1,1,2]], "bass":[[2,2,2,2]], "pad":[[8]]},
+    "Latin":    {"lead":[[1,1,2,1,1,2]], "counter":[[1,1,1,1,1,1,2]], "bass":[[2,2,1,1]], "pad":[[4,4]]},
+}
+INSTRUMENTS = {
+    "Flute":         {"role":"lead",    "range":(72,96)},
+    "Oboe":          {"role":"lead",    "range":(67,91)},
+    "Clarinet":      {"role":"counter", "range":(60,88)},
+    "Reed Section":  {"role":"counter", "range":(60,92)},
+    "Violin":        {"role":"lead",    "range":(67,96)},
+    "Viola":         {"role":"counter", "range":(55,79)},
+    "Cello":         {"role":"bass",    "range":(48,67)},
+    "Double Bass":   {"role":"bass",    "range":(40,64)},
+    "Piano Pad":     {"role":"pad",     "range":(48,84)},
+    "Strings Pad":   {"role":"pad",     "range":(55,91)},
+}
+def gen_rhythm(patterns, bars): return [d for b in range(bars) for d in patterns[b % len(patterns)]]
+
+
+# -------------------- Lead generator --------------------
+ALLOWED_INTERVALS = [-7,-5,-4,-3,-2,-1,1,2,3,4,5,7]
+BASE_W = {i: (6-abs(i)) if abs(i)<=4 else (2 if abs(i) in (5,7) else 1) for i in ALLOWED_INTERVALS}
+
+def sample_interval(prev_iv, weights):
+    w = dict(weights)
+    if abs(prev_iv)>=4:
+        for i in (1,2):
+            w[-i if prev_iv>0 else i] = w.get(-i if prev_iv>0 else i,1)*1.7
+    tot = sum(w.values()); r = random.random()*tot; c=0.0
+    for iv, wt in w.items():
+        c += wt
+        if r <= c: return iv
+    import random as _r
+    return _r.choice(ALLOWED_INTERVALS)
+
+def choose_nearest_scale(target, scale): return min(scale, key=lambda m: abs(m-target))
+
+def generate_lead_eighths(key, mode, raga, bars, register=(60,84)):
+    scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
+    start_note = tonic_near_middle(key, scale, middle=60)
+    line = [start_note]
+    weights = dict(BASE_W); prev_iv = 0
+    total_eighths = bars*8
+    for _ in range(1,total_eighths):
+        iv = sample_interval(prev_iv, weights)
+        cand = line[-1] + iv
+        nearest = choose_nearest_scale(cand, scale)
+        line.append(nearest); prev_iv = iv
+    line[-1] = tonic_near_middle(key, scale, middle=line[-1])
+    return line
+
+
+# -------------------- Western counterpoint (simplified species) --------------------
+SPECIES_RHYTHM = {"1":[8], "2":[4,4], "3":[2,2,2,2], "4":[6,2], "5":[1,1,2,1,1,2], "Classical":[1,1,2,1,1,2]}
+
+def generate_counter_species(cantus_slots, key, mode, raga, bars, species, register=(55,84)):
+    scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
+    total = bars*8; out=[]; i=0
+    while i < total:
+        c = cantus_slots[i]
+        if species == "1":
+            cand = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c))); out += [cand]*8; i += 8
+        elif species == "2":
+            first = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c)))
+            second = min(step_options(first, scale) or [first], key=lambda n: abs(n-first))
+            out += [first]*4 + [second]*4; i += 8
+        elif species == "3":
+            b1 = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c)))
+            s1 = min(step_options(b1, scale) or [b1], key=lambda n: abs(n-b1))
+            b3 = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c)))
+            s3 = min(step_options(b3, scale) or [b3], key=lambda n: abs(n-b3))
+            out += [b1]*2 + [s1]*2 + [b3]*2 + [s3]*2; i += 8
+        elif species == "4":
+            held = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c)))
+            res = [n for n in (held-1,held-2) if n in scale] or step_options(held, scale) or [held]
+            out += [held]*6 + [res[0]]*2; i += 8
+        else:  # "5" or "Classical"
+            b1 = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c)))
+            n1 = min(step_options(b1, scale) or [b1], key=lambda n: abs(n-b1))
+            n2 = min(step_options(n1, scale) or [n1], key=lambda n: abs(n-n1))
+            b3 = min(scale, key=lambda n: (0 if consonant_with(n,c) else 1, abs(n-c)))
+            n3 = min(step_options(b3, scale) or [b3], key=lambda n: abs(n-b3))
+            n4 = min(step_options(n3, scale) or [n3], key=lambda n: abs(n-n3))
+            out += [b1, n1, n2, n2, b3, n3, n4, n4]; i += 8
+    return out[:total]
+
+def _avoid_parallels_and_accented(lead: List[int], other: List[int], scale: List[int]) -> List[int]:
+    out = other[:]
+    total = min(len(lead), len(other))
+    for i in range(total):
+        beat_pos = i % 8
+        interval = abs((lead[i] - out[i]) % 12)
+        # Avoid perfect unisons/octaves moving in same direction (rough)
+        if interval in (0,7) and i > 0:
+            if (lead[i]-lead[i-1])*(out[i]-out[i-1]) > 0:
+                opts = step_options(out[i], scale)
+                if opts:
+                    out[i] = min(opts, key=lambda x: abs((abs((lead[i]-x)%12) - 3)))
+        # Accented dissonance on strong 8ths
+        if beat_pos in (0,2,4,6):
+            if interval not in (0,3,4,5,7,8,9):
+                opts = step_options(out[i], scale)
+                if opts:
+                    out[i] = min(opts, key=lambda x: 0 if abs((lead[i]-x)%12) in (0,3,4,5,7,8,9) else 1)
+    return out
+
+
+# -------------------- Raga-fugal helpers --------------------
+def _raga_pcs(key: str, raga: str) -> List[int]:
+    tonic = MAJOR_PC[key]
+    degs = RAGA_DEGREES[raga]
+    return [ (tonic + d) % 12 for d in degs ]
+
+def _raga_degree_index(pc: int, pcs: List[int]) -> int:
+    return min(range(len(pcs)), key=lambda i: min((pc - pcs[i]) % 12, (pcs[i] - pc) % 12))
+
+def _transpose_degree_in_raga(midi: int, key: str, raga: str, degree_steps: int) -> int:
+    pcs = _raga_pcs(key, raga)
+    idx = _raga_degree_index(midi % 12, pcs)
+    tgt_idx = (idx + degree_steps) % len(pcs)
+    tgt_pc = pcs[tgt_idx]
+    candidates = [midi-24, midi-12, midi, midi+12, midi+24]
+    best = min(candidates, key=lambda m: (0 if (m % 12)==tgt_pc else 1, abs(m - midi)))
+    if best % 12 != tgt_pc:
+        for delta in range(-6, 7):
+            cand = best + delta
+            if cand % 12 == tgt_pc:
+                best = cand; break
+    return best
+
+def _raga_answer_steps(key: str, raga: str) -> int:
+    pcs = set(_raga_pcs(key, raga))
+    tonic = MAJOR_PC[key]
+    pa = (tonic + 7) % 12
+    ma = (tonic + 5) % 12
+    degs = _raga_pcs(key, raga)
+    if pa in pcs:
+        return degs.index(pa)
+    if ma in pcs:
+        return degs.index(ma)
+    return 0
+
+def _clip_to_range(m: int, rng: Tuple[int,int], scale: List[int]) -> int:
+    if m < rng[0]: m += 12 * ((rng[0]-m + 11)//12)
+    if m > rng[1]: m -= 12 * ((m-rng[1] + 11)//12)
+    return min((x for x in scale if rng[0]<=x<=rng[1]), key=lambda x: abs(x-m))
+
+def _raga_contrary_step(prev: int, target: int, scale: List[int]) -> int:
+    dir = -1 if target > prev else 1
+    cands = [prev + dir, prev + 2*dir]
+    cands = [c for c in cands if c in scale]
+    return cands[0] if cands else prev
+
+def build_raga_fugal_parts(lead_slots: List[int], key: str, raga: str,
+                           bars: int, insts: List[dict]) -> Dict[str, dict]:
+    total = bars*8
+    parts_map: Dict[str, dict] = {}
+    scale_cache = {}
+    for inst in insts:
+        rng = inst["range"]
+        scale_cache[inst["name"]] = scale_midis(key, "major", raga, low=rng[0], high=rng[1])
+
+    for inst in insts:
+        if inst["role"] == "lead":
+            parts_map[inst["name"]] = {"slots": lead_slots[:total]}
+            break
+
+    deg_steps = _raga_answer_steps(key, raga)
+    role_offsets = {"counter": 8, "bass": 4, "pad": 16}
+
+    for inst in insts:
+        if inst["role"] == "lead":
+            continue
+        rng = inst["range"]
+        rscale = scale_cache[inst["name"]]
+        off = role_offsets.get(inst["role"], 8)
+
+        raw = []
+        for i in range(total):
+            src_idx = max(0, i - off)
+            src_note = lead_slots[src_idx] if i >= off else lead_slots[0]
+            im_note = _transpose_degree_in_raga(src_note, key, raga, deg_steps)
+            if i>0 and i%4==0:
+                im_note = _raga_contrary_step(raw[-1] if raw else im_note, im_note, rscale)
+            im_note = _clip_to_range(im_note, rng, rscale)
+            raw.append(im_note)
+
+        parts_map[inst["name"]] = {"slots": raw[:total]}
+
+    lead = parts_map[[i["name"] for i in insts if i["role"]=="lead"][0]]["slots"]
+    for name, pdata in parts_map.items():
+        if name == [i["name"] for i in insts if i["role"]=="lead"][0]:
+            continue
+        out = pdata["slots"][:]
+        rng = next(i2 for i2 in insts if i2["name"]==name)["range"]
+        rscale = scale_cache[name]
+        for i in range(total):
+            if abs((lead[i]-out[i])%12) == 0:
+                opts = [x for x in [out[i]-1,out[i]+1,out[i]-2,out[i]+2] if x in rscale and rng[0]<=x<=rng[1]]
+                if opts:
+                    out[i] = min(opts, key=lambda x: abs((lead[i]-x)%12) in (0,7))
+        pdata["slots"] = out
+    return parts_map
+
+
+# -------------------- MusicXML --------------------
+def parts_to_musicxml(parts, key, mode, raga, tempo, bars):
+    flats = prefers_flats(key)
+    root = ET.Element("score-partwise", version="3.1")
+    part_list = ET.SubElement(root, "part-list")
+    for i,p in enumerate(parts, start=1):
+        score_part = ET.SubElement(part_list, "score-part", id=f"P{i}")
+        name = p["name"] + ("" if (not raga or raga=="None (use Western mode)") else f" ({raga})")
+        ET.SubElement(score_part, "part-name").text = name
+    for i,p in enumerate(parts, start=1):
+        part = ET.SubElement(root, "part", id=f"P{i}")
+        divisions = 2
+        events = []; idx=0
+        for dur in p["rhythm"]:
+            pitch = p["slots"][idx]; events.append((pitch, dur)); idx += dur
+        meas = ET.SubElement(part, "measure", number="1")
+        attrs = ET.SubElement(meas, "attributes")
+        ET.SubElement(attrs, "divisions").text = str(divisions)
+        k = ET.SubElement(attrs, "key")
+        ET.SubElement(k, "fifths").text = str(FIFTHS[key])
+        ET.SubElement(k, "mode").text = "major" if mode=="major" else "minor"
+        t = ET.SubElement(attrs, "time"); ET.SubElement(t, "beats").text="4"; ET.SubElement(t, "beat-type").text="4"
+        clef = ET.SubElement(attrs, "clef"); ET.SubElement(clef, "sign").text="G"; ET.SubElement(clef, "line").text="2"
+        d = ET.SubElement(meas, "direction", placement="above"); dt = ET.SubElement(d, "direction-type"); m = ET.SubElement(dt, "metronome")
+        ET.SubElement(m, "beat-unit").text="quarter"; ET.SubElement(m, "per-minute").text=str(tempo); ET.SubElement(d, "sound", tempo=str(tempo))
+        measure_num=1; used=0
+        for pitch, dur8 in events:
+            while used + dur8 > 8:
+                split = 8 - used; _emit_note(meas, pitch, split, divisions, flats)
+                measure_num += 1; meas = ET.SubElement(part, "measure", number=str(measure_num)); used=0; dur8 -= split
+            _emit_note(meas, pitch, dur8, divisions, flats); used += dur8
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True, method="xml")
+
+def _emit_note(meas, midi, dur8, divisions, flats):
+    duration = int(dur8 * (divisions/1))
+    note = ET.SubElement(meas, "note")
+    pitch = ET.SubElement(note, "pitch")
+    step, alter, octave = midi_to_pitch(midi, flats=flats)
+    ET.SubElement(pitch, "step").text = step
+    if alter!=0: ET.SubElement(pitch, "alter").text = str(alter)
+    ET.SubElement(pitch, "octave").text = str(octave)
+    ET.SubElement(note, "duration").text = str(duration); ET.SubElement(note, "voice").text = "1"
+    ET.SubElement(note, "type").text = {1:"eighth",2:"quarter",4:"half",8:"whole"}.get(dur8, "eighth")
+
+
+# -------------------- MIDI export --------------------
+PROGRAMS_GM = {
+    "lead":   73,   # Flute
+    "counter":71,   # Clarinet
+    "bass":   32,   # Acoustic Bass
+    "pad":    88,   # Warm Pad
+}
+PROGRAMS_PER_INST = {
+    "Violin": 40, "Viola": 41, "Cello": 42, "Double Bass": 43,
+    "Flute": 73, "Oboe": 68, "Clarinet": 71, "Reed Section": 65,
+    "Piano Pad": 0, "Strings Pad": 48
+}
+def _program_for_part(p):
+    return PROGRAMS_PER_INST.get(p["name"], PROGRAMS_GM.get(p["role"], 73))
+
+def parts_to_midi_bytes(parts, tempo_bpm):
+    if not _HAS_MIDO:
+        raise RuntimeError("mido not installed")
+    mid = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+
+    us_per_beat = int(60_000_000 / max(1, int(tempo_bpm)))
+    track.append(mido.MetaMessage('set_tempo', tempo=us_per_beat, time=0))
+
+    events = []  # (abs_tick, kind, a, b, channel)
+    channel = 0
+    for p in parts:
+        program = _program_for_part(p)
+        events.append((0, "program_change", program, None, channel))
+        abs_tick = 0
+        idx = 0
+        for dur8 in p["rhythm"]:
+            pitch = p["slots"][idx]
+            dur_q = dur8 / 2.0
+            dur_ticks = int(dur_q * 480)
+            events.append((abs_tick, "on", pitch, 92, channel))
+            events.append((abs_tick + dur_ticks, "off", pitch, 64, channel))
+            abs_tick += dur_ticks
+            idx += dur8
+        channel = (channel + 1) % 16
+
+    def _sort_key(e):
+        t, kind, *_ = e
+        pri = 0 if kind == "program_change" else (1 if kind == "off" else 2)
+        return (t, pri)
+    events.sort(key=_sort_key)
+
+    current = 0
+    prog_by_chan = {}
+    for t, kind, a, b, ch in events:
+        delta = t - current; current = t
+        if kind == "program_change":
+            prev = prog_by_chan.get(ch, None)
+            track.append(mido.Message('program_change', channel=ch, program=int(a), time=delta))
+            prog_by_chan[ch] = a
+        elif kind == "on":
+            track.append(mido.Message('note_on', channel=ch, note=int(a), velocity=int(b), time=delta))
+        elif kind == "off":
+            track.append(mido.Message('note_off', channel=ch, note=int(a), velocity=int(b), time=delta))
+
+    bio = io.BytesIO()
+    mid.save(file=bio)
+    return bio.getvalue()
+
+
+# -------------------- Audio preview: sine fallback --------------------
+_INSTR_GAIN = {"lead":0.9,"counter":0.75,"bass":0.75,"pad":0.55}
+def _midi_to_hz(n): return 440.0 * (2.0 ** ((n - 69) / 12.0))
+
+def parts_to_wav_preview_sine(parts, tempo_bpm, bars=4, sr=22050):
+    seconds_per_beat = 60.0 / max(1, tempo_bpm)
+    beats_total = 4 * bars
+    seconds_total = beats_total * seconds_per_beat
+    n_samples = int(seconds_total * sr)
+    if _HAS_NP:
+        mix = _np.zeros(n_samples, dtype=_np.float32)
+    else:
+        mix = [0.0] * n_samples
+
+    for p in parts:
+        role = p["role"]; gain = _INSTR_GAIN.get(role, 0.6)
+        idx = 0; t_cursor = 0.0
+        for dur8 in p["rhythm"]:
+            if t_cursor >= seconds_total: break
+            pitch = p["slots"][idx]
+            dur_q = dur8 / 2.0
+            dur_sec = dur_q * seconds_per_beat
+            f = _midi_to_hz(pitch)
+            start = int(t_cursor * sr)
+            end = min(n_samples, int((t_cursor + dur_sec) * sr))
+            length = max(1, end - start)
+            for i in range(length):
+                s = math.sin(2*math.pi*f*(i/sr))
+                a = min(1.0, i/(0.01*sr))
+                r = min(1.0, (length-1-i)/(0.01*sr))
+                env = min(a, r)
+                val = gain * 0.3 * s * env
+                if _HAS_NP:
+                    mix[start+i] += val
+                else:
+                    mix[start+i] += val
+            t_cursor += dur_sec
+            idx += dur8
+
+    if _HAS_NP:
+        mx = max(1e-6, float(_np.max(_np.abs(mix))))
+        mix = (mix / mx * 0.95)
+        pcm16 = (mix * 32767.0).astype(_np.int16).tobytes()
+    else:
+        mx = max(1e-6, max(abs(x) for x in mix))
+        out = io.BytesIO()
+        for x in mix:
+            v = int(32767 * 0.95 * (x / mx))
+            out.write(struct.pack("<h", max(-32768, min(32767, v))))
+        pcm16 = out.getvalue()
+
+    buf = io.BytesIO()
+    import wave
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes(pcm16)
+    return buf.getvalue()
+
+
+# -------------------- SoundFont rendering (two paths) --------------------
+def _which(cmd: str) -> Optional[str]:
+    return shutil.which(cmd)
+
+def render_preview_with_pyfluidsynth(parts, tempo_bpm, sf_path: str, sr=44100) -> Optional[bytes]:
+    """Use pyFluidSynth to render the MIDI to WAV (stereo)."""
+    if not (_HAS_PYFS and _HAS_MIDO):
+        return None
+    if not os.path.isfile(sf_path):
+        return None
+    try:
+        midi_bytes = parts_to_midi_bytes(parts, int(tempo_bpm))
+        mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
+        fs = pyfs.Synth(samplerate=sr)
+        sfid = fs.sfload(sf_path, True)  # reset presets
+        fs.program_reset()
+
+        # Track program changes per channel
+        for tr in mid.tracks:
+            for msg in tr:
+                if msg.type == "program_change":
+                    fs.program_select(msg.channel, sfid, 0, msg.program)
+
+        # Offline render by simulating time
+        block = 64
+        audio = []
+        time_sec = 0.0
+        mid.ticks_per_beat = mid.ticks_per_beat or 480
+
+        # Default tempo 120 if not set; tick2second handles set_tempo events
+        for tr in mid.tracks:
+            t_sec = 0.0
+            for msg in tr:
+                t_sec += mido.tick2second(msg.time, mid.ticks_per_beat,
+                                          500000 if msg.type!="set_tempo" else msg.tempo)
+                while time_sec < t_sec:
+                    audio.extend(fs.get_samples(block))
+                    time_sec += block / sr
+                if msg.type == "program_change":
+                    fs.program_select(msg.channel, sfid, 0, msg.program)
+                elif msg.type == "note_on":
+                    fs.noteon(msg.channel, msg.note, msg.velocity)
+                elif msg.type == "note_off":
+                    fs.noteoff(msg.channel, msg.note)
+
+        # Drain
+        for _ in range(int(sr*0.5 // block)):
+            audio.extend(fs.get_samples(block))
+        fs.delete()
+
+        if not audio:
+            return None
+
+        import array, wave
+        arr = array.array('f', audio)  # float32 stereo interleaved
+        if _HAS_NP:
+            a = _np.frombuffer(arr.tobytes(), dtype=_np.float32)
+            a = a / max(1e-6, _np.max(_np.abs(a))) * 0.95
+            pcm16 = (a * 32767.0).astype(_np.int16).tobytes()
+        else:
+            mx = max(1e-6, max(abs(x) for x in arr))
+            pcm16 = b''.join(struct.pack("<h", int(max(-32768, min(32767, x/mx*32767*0.95)))) for x in arr)
+
+        buf = io.BytesIO()
+        import wave
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr); w.writeframes(pcm16)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+def render_preview_with_cli(parts, tempo_bpm, sf_path: str, sr=44100) -> Optional[bytes]:
+    """Use fluidsynth CLI if present."""
+    cli = _which("fluidsynth")
+    if (not cli) or (not _HAS_MIDO) or (not os.path.isfile(sf_path)):
+        return None
+    try:
+        midi_bytes = parts_to_midi_bytes(parts, int(tempo_bpm))
+        with tempfile.TemporaryDirectory() as td:
+            midf = os.path.join(td, "prev.mid")
+            wavf = os.path.join(td, "prev.wav")
+            with open(midf, "wb") as f:
+                f.write(midi_bytes)
+            cmd = [cli, "-ni", sf_path, midf, "-F", wavf, "-r", str(sr)]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            with open(wavf, "rb") as f:
+                return f.read()
+    except Exception:
+        return None
+    return None
+
+
+# -------------------- Score upload (fingerprint) --------------------
+@dataclass
+class ScoreFingerprint:
+    contour: List[int]
+    rhythm_quavers: List[int]
+    tonic_pc: int
+    mode_guess: str
+
+def _safe_parse_bytes_with_format(file_bytes: bytes, filename: str):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in (".mid", ".midi"):
+        return m21.converter.parseData(file_bytes, format="midi")
+    try:
+        text = file_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        text = file_bytes
+    return m21.converter.parseData(text, format="musicxml")
+
+def analyze_upload(file_bytes: bytes, filename: str) -> Optional[ScoreFingerprint]:
+    if not _HAS_M21:
+        return None
+    try:
+        s = _safe_parse_bytes_with_format(file_bytes, filename)
+    except Exception as e:
+        st.error(f"Unable to parse uploaded score (in-memory): {e}")
+        return None
+
+    try:
+        k = s.analyze("key")
+        mode_guess = "major" if k.mode.lower().startswith("major") else "harmonic_minor"
+        tonic_pc = MAJOR_PC.get(k.tonic.name.replace("-", "b"), 0)
+    except Exception:
+        mode_guess = "major"; tonic_pc = 0
+
+    melody = s.parts[0].flat.notes if s.parts else s.flat.notes
+    midi = [n.pitch.midi for n in melody if hasattr(n, "pitch")]
+    if len(midi) < 4:
+        st.warning("Uploaded score has too few melodic notes to fingerprint.")
+        return None
+
+    contour = []
+    for i in range(1, len(midi)):
+        d = midi[i] - midi[i-1]
+        if d <= -3: contour.append(-2)
+        elif d >= 3: contour.append(+2)
+        elif d < 0: contour.append(-1)
+        elif d > 0: contour.append(+1)
+        else: contour.append(0)
+
+    try:
+        ql = s.flat.quarterLength
+        n_quavers = int(round(ql * 2))
+        quavers = [1] * max(1, n_quavers)
+    except Exception:
+        quavers = [1] * 32
+
+    return ScoreFingerprint(contour=contour, rhythm_quavers=quavers, tonic_pc=tonic_pc, mode_guess=mode_guess)
+
+
+def contour_to_slots(fp_contour: List[int], key: str, mode: str, raga: Optional[str], bars: int, register=(60,84)):
+    scale = scale_midis(key, mode, raga, low=register[0], high=register[1])
+    start = tonic_near_middle(key, scale, middle=60)
+    total_quavers = bars * 8
+
+    out = [start]
+    ci = 0
+    while len(out) < total_quavers:
+        step = 0
+        if ci < len(fp_contour):
+            c = fp_contour[ci]
+            step = -2 if c <= -2 else (2 if c >= 2 else c)
+        candidates = step_options(out[-1], scale) or [out[-1]]
+        target = out[-1] + step
+        nxt = min(candidates, key=lambda m: abs(m - target))
+        out.append(nxt)
+        ci += 1
+
+    out[-1] = tonic_near_middle(key, scale, middle=out[-1])
+    return out[:total_quavers]
+
+
+# -------------------- Diagnostics --------------------
+def _diagnose_sf(sf_path: str) -> str:
+    sf_ok = os.path.isfile(sf_path)
+    try:
+        import fluidsynth as _pf  # noqa
+        pyfs_ok = True
+    except Exception:
+        pyfs_ok = False
+    cli_ok = _which("fluidsynth") is not None
+    fmt = "SF path: {sf} | pyFluidSynth: {pyfs} | Fluidsynth CLI: {cli}"
+    return fmt.format(
+        sf=("OK" if sf_ok else "MISSING"),
+        pyfs=("OK" if pyfs_ok else "MISSING"),
+        cli=("OK" if cli_ok else "MISSING"),
+    )
+
+
+# -------------------- UI --------------------
+st.set_page_config(page_title=APP_NAME, page_icon="🎼", layout="centered")
+
+base_img = load_header_image()
+if base_img is not None:
+    set_page_background(base_img)
+hero(APP_NAME)
+
+with st.sidebar:
+    st.markdown("### Branding / Images")
+    up_img = st.file_uploader("Upload a header/background (jpg/png)", type=["jpg","jpeg","png"])
+    if up_img is not None:
+        hdr = Image.open(up_img).convert("RGB")
+        st.image(hdr, caption="Uploaded", use_container_width=True)
+        set_page_background(hdr)
+    st.caption("Tip: keep **header.jpg** next to the script for persistent branding.")
+
+col1, col2 = st.columns(2)
+
+key_input = col1.selectbox("Key", KEYS_CANON, index=KEYS_CANON.index("C"), key="ui_key")
+
+raga_input = st.selectbox(
+    "Carnatic Raga (optional)",
+    ["None (use Western mode)"] + list(RAGA_DEGREES.keys()),
+    index=0,
+    help="Choose a raga to constrain pitch material. Rhythm still follows Arrangement Style."
+)
+
+mode_slot = col2.empty()
+MODES = ["major", "harmonic_minor", "natural_minor"]
+if "ui_mode" not in st.session_state:
+    st.session_state.ui_mode = "major"
+if raga_input != "None (use Western mode)":
+    mode_slot.markdown("**Mode**: _controlled by raga_")
+    mode_input = st.session_state.ui_mode
+else:
+    mode_input = mode_slot.selectbox("Mode", MODES, index=MODES.index(st.session_state.ui_mode), key="ui_mode")
+
+style = st.selectbox("Arrangement Style", list(STYLE_PATTERNS.keys()), index=2)
+
+species_slot = st.empty()
+if raga_input != "None (use Western mode)":
+    species_slot.markdown("**Counterpoint Species**: _raga-fugal (auto)_")
+    species = "Classical"  # ignored
+else:
+    species = species_slot.selectbox("Counterpoint Species (counter part)", ["1","2","3","4","5","Classical"], index=2)
+
+bars = st.slider("Bars (4/4 time)", 4, 128, 32, 1)
+target_tokens = st.number_input("Optional: target length in eighth-notes (overrides Bars)", min_value=0, value=0, step=8)
+bars_eff = int(math.ceil(target_tokens/8)) if target_tokens>0 else int(bars)
+st.caption(f"Effective bars: {bars_eff} (total eighth-note tokens ≈ {bars_eff*8})")
+
+tempo = st.slider("Tempo (BPM)", 60, 160, 96, 2)
+seed = st.number_input("Random seed (optional)", value=0, step=1)
+
+available = list(INSTRUMENTS.keys())
+chosen = st.multiselect("Pick instruments (first lead carries melody)", available,
+                        default=["Flute","Reed Section","Double Bass","Strings Pad","Piano Pad"])
+
+st.markdown("#### Optional: upload a reference score (MusicXML or MIDI)")
+upload = st.file_uploader(
+    "We’ll learn the melodic contour; rhythm always follows your Arrangement Style.",
+    type=["xml","musicxml","mxl","mid","midi"]
+)
+
+# SoundFont settings
+st.markdown("#### SoundFont (optional, for realistic audio preview)")
+sf_col1, sf_col2 = st.columns([3,1])
+sf_path = sf_col1.text_input("SF2 / SF3 file path (e.g., FluidR3_GM.sf2, MuseScore_General.sf3)", value=st.session_state.get("sf_path",""))
+use_sf = sf_col2.checkbox("Use SoundFont", value=bool(st.session_state.get("sf_use", False)))
+if sf_path and os.path.isfile(sf_path):
+    st.session_state.sf_path = sf_path
+if use_sf:
+    st.session_state.sf_use = True
+    if not sf_path or not os.path.isfile(sf_path):
+        st.warning("Enable is on, but no valid SF2/SF3 path found. Falling back to synthetic preview.")
+else:
+    st.session_state.sf_use = False
+
+fp: Optional[ScoreFingerprint] = None
+if upload is not None and _HAS_M21:
+    try:
+        fp = analyze_upload(upload.read(), upload.name)
+        if fp:
+            st.success("Score parsed. We'll guide the lead line using its contour (style keeps the rhythm).")
+    except Exception as e:
+        st.error(f"Unable to parse uploaded score: {e}")
+
+if st.button("Generate Score"):
+    effective_mode = mode_input if raga_input == "None (use Western mode)" else "major"
+    key, mode = normalize_key_mode(key_input, effective_mode)
+    raga = raga_input
+
+    if seed: random.seed(int(seed))
+    patt = STYLE_PATTERNS[style]
+    rhythms = {role: gen_rhythm(patt[role], bars_eff) for role in patt}
+    insts = [{"name":n, **INSTRUMENTS[n]} for n in chosen if n in INSTRUMENTS]
+    if not insts:
+        st.error("Pick at least one instrument.")
+        st.stop()
+    if not any(i["role"]=="lead" for i in insts):
+        insts[0]["role"]="lead"
+
+    lead_inst = next(i for i in insts if i["role"]=="lead")
+    if fp is not None:
+        lead_slots = contour_to_slots(fp.contour, key, mode, raga, bars_eff, register=lead_inst["range"])
+    else:
+        lead_slots = generate_lead_eighths(key, mode, raga, bars_eff, register=lead_inst["range"])
+
+    parts = []
+    if raga != "None (use Western mode)":
+        raga_parts = build_raga_fugal_parts(lead_slots, key, raga, bars_eff, insts)
+        for inst in insts:
+            role = inst["role"]
+            rhythm = rhythms[role]
+            slots_all = raga_parts[inst["name"]]["slots"]
+            parts.append({"name": inst["name"], "role": role, "rhythm": rhythm, "slots": slots_all})
+    else:
+        for inst in insts:
+            role = inst["role"]
+            rhythm = rhythms[role]
+            if role == "lead":
+                slots = lead_slots[:bars_eff*8]
+            elif role == "counter":
+                slots = generate_counter_species(lead_slots, key, mode, raga, bars_eff, species, register=inst["range"])
+                scl = scale_midis(key, mode, None, low=inst["range"][0], high=inst["range"][1])
+                slots = _avoid_parallels_and_accented(lead_slots[:bars_eff*8], slots, scl)
+            elif role == "bass":
+                base_scale = scale_midis(key, mode, None, low=inst["range"][0], high=inst["range"][1])
+                slots = []
+                for i,pn in enumerate(lead_slots[:bars_eff*8]):
+                    target = pn-12 if (i%8) in (0,4) else pn-7
+                    slots.append(min(base_scale, key=lambda m: abs(m-target)))
+            else:  # pad
+                base_scale = scale_midis(key, mode, None, low=inst["range"][0], high=inst["range"][1])
+                slots = []
+                for i,pn in enumerate(lead_slots[:bars_eff*8]):
+                    target = pn if (i%8) in (0,4) else (slots[-1] if slots else pn)
+                    slots.append(min(base_scale, key=lambda m: abs(m-target)))
+            parts.append({"name": inst["name"], "role": role, "rhythm": rhythm, "slots": slots})
+
+    # ---- Downloads & preview ----
+    xml_bytes = parts_to_musicxml(parts, key, mode, raga, int(tempo), bars_eff)
+    st.success("Generated! Download your score:")
+
+    st.download_button(
+        "Download MusicXML",
+        data=xml_bytes,
+        file_name="CR_Counter_Arrangement.xml",
+        mime="application/vnd.recordare.musicxml+xml"
+    )
+
+    if _HAS_MIDO:
+        try:
+            midi_bytes = parts_to_midi_bytes(parts, int(tempo))
+            st.download_button(
+                "Download MIDI",
+                data=midi_bytes,
+                file_name="CR_Counter_Arrangement.mid",
+                mime="audio/midi"
+            )
+        except Exception as e:
+            st.warning(f"MIDI export failed: {e} (install/update `mido`)")
+
+    with st.expander("Audio preview (first 4 bars)"):
+        renderer_used = "sine (fallback)"
+        wav_bytes = None
+
+        if st.session_state.get("sf_use") and st.session_state.get("sf_path"):
+            st.caption(_diagnose_sf(st.session_state.sf_path))
+
+        # 1) pyFluidSynth
+        if st.session_state.get("sf_use") and st.session_state.get("sf_path") and os.path.isfile(st.session_state.sf_path):
+            wav_bytes = render_preview_with_pyfluidsynth(parts, int(tempo), st.session_state.sf_path, sr=44100)
+            if wav_bytes:
+                renderer_used = "SoundFont via pyFluidSynth"
+
+        # 2) Fluidsynth CLI
+        if wav_bytes is None and st.session_state.get("sf_use") and st.session_state.get("sf_path") and os.path.isfile(st.session_state.sf_path):
+            wav_bytes = render_preview_with_cli(parts, int(tempo), st.session_state.sf_path, sr=44100)
+            if wav_bytes:
+                renderer_used = "SoundFont via Fluidsynth CLI"
+
+        # 3) sine fallback
+        if wav_bytes is None:
+            try:
+                wav_bytes = parts_to_wav_preview_sine(parts, int(tempo), bars=4, sr=22050)
+            except Exception as e:
+                st.warning(f"Audio preview failed: {e}")
+
+        st.audio(wav_bytes, format="audio/wav")
+        st.caption(f"Renderer: {renderer_used}")
+
+    flats = prefers_flats(key)
+    st.markdown("**Preview (first 16 eighths per part)**")
+    for p in parts:
+        names = ", ".join(midi_to_name(m, flats) for m in p["slots"][:16])
+        st.write(f"{p['name']} ({p['role']}): {names}")
