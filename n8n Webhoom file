@@ -1,0 +1,26 @@
+Add a Function node.
+
+Paste the code below into it.
+
+Provide inputs via the incoming item’s JSON (or edit the defaults inside the code).
+
+Downstream, use Respond to Webhook (Binary mode) or a storage node to send/save:
+
+binary.musicxml → CR_Counter_Arrangement.xml
+
+binary.midi → CR_Counter_Arrangement.mid
+
+Example incoming JSON (Webhook → Function):
+
+{
+  "key": "C",
+  "mode": "major",
+  "raga": "None (use Western mode)",
+  "style": "R&B",
+  "species": "Classical",
+  "bars": 32,
+  "targetTokens": 0,
+  "tempo": 96,
+  "seed": 42,
+  "instruments": ["Flute","Reed Section","Double Bass","Strings Pad","Piano Pad"]
+}
